@@ -327,6 +327,7 @@ export default function Editor() {
 
   /** Begins tracking two finger gestures over the video preview. */
   const trackViewerPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.target instanceof Element && event.target.closest('.viewer-play-button')) return;
     if (event.pointerType === 'mouse' && event.button === 0 && viewerZoom > 1) {
       viewerDragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, pan: viewerPan };
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -735,6 +736,11 @@ export default function Editor() {
         redoProject();
         return;
       }
+      if (event.code === 'Space' && !event.repeat) {
+        event.preventDefault();
+        togglePlayback();
+        return;
+      }
       if (event.key !== 'Backspace' && event.key !== 'Delete') return;
       if (!selectedClipIds.length && !selectedClipId) return;
       event.preventDefault();
@@ -742,7 +748,7 @@ export default function Editor() {
     };
     window.addEventListener('keydown', handleEditorShortcut);
     return () => window.removeEventListener('keydown', handleEditorShortcut);
-  }, [redoProject, removeSelectedClip, selectedClipId, selectedClipIds.length, undoProject]);
+  }, [redoProject, removeSelectedClip, selectedClipId, selectedClipIds.length, togglePlayback, undoProject]);
 
   /** Starts moving or trimming a clip based on the pointer target. */
   const beginClipDrag = (event: ReactPointerEvent<HTMLElement>, clip: TimelineClip, mode: DragState['mode']) => {
@@ -875,7 +881,7 @@ export default function Editor() {
 
         <section className="preview-area">
           <div className="preview-header"><div className="preview-label"><span className="live-dot" /> CANVAS PREVIEW</div><div className="preview-resolution"><button className="viewer-zoom-step" aria-label="Zoom viewer out" title="Zoom out" onClick={() => adjustViewerZoom(-0.1)}><ZoomOut size={13} /></button><button className="viewer-zoom-reset" title="Reset viewer zoom" onClick={() => { setViewerZoom(1); setViewerPan({ x: 0, y: 0 }); }}>{Math.round(viewerZoom * 100)}%</button><button className="viewer-zoom-step" aria-label="Zoom viewer in" title="Zoom in" onClick={() => adjustViewerZoom(0.1)}><ZoomIn size={13} /></button> 1280 × 720 <span>·</span> {formatTime(currentTime)}</div></div>
-          <div className={`preview-stage viewer-zoom-surface ${viewerPanning ? 'panning' : ''}`} onPointerDownCapture={trackViewerPointer} onPointerMoveCapture={updateViewerPinch} onPointerUpCapture={endViewerPinch} onPointerCancelCapture={endViewerPinch}><div className="player-frame" style={{ transform: `translate(${viewerPan.x}px, ${viewerPan.y}px) scale(${viewerZoom})`, cursor: viewerPanning ? 'grabbing' : viewerZoom > 1 ? 'grab' : 'default' }}><canvas ref={canvasRef} width={1280} height={720} /><video ref={videoRef} playsInline hidden /><audio ref={audioRef} hidden /><img ref={imageRef} src={activeVideoAsset?.kind === 'image' ? assetUrls.get(activeVideoAsset.id) : undefined} hidden onLoad={() => setCurrentTime((time) => time)} /></div></div>
+          <div className={`preview-stage viewer-zoom-surface ${viewerPanning ? 'panning' : ''}`} onPointerDownCapture={trackViewerPointer} onPointerMoveCapture={updateViewerPinch} onPointerUpCapture={endViewerPinch} onPointerCancelCapture={endViewerPinch}><div className="player-frame" style={{ transform: `translate(${viewerPan.x}px, ${viewerPan.y}px) scale(${viewerZoom})`, cursor: viewerPanning ? 'grabbing' : viewerZoom > 1 ? 'grab' : 'default' }}><canvas ref={canvasRef} width={1280} height={720} /><video ref={videoRef} playsInline hidden /><audio ref={audioRef} hidden /><img ref={imageRef} src={activeVideoAsset?.kind === 'image' ? assetUrls.get(activeVideoAsset.id) : undefined} hidden onLoad={() => setCurrentTime((time) => time)} /></div>{!playing && duration > 0 && <button className="viewer-play-button" aria-label="Play video preview" title="Play video preview (Space)" onPointerDown={(event) => event.stopPropagation()} onClick={togglePlayback}><Play size={22} fill="currentColor" /></button>}</div>
           <div className="transport"><div className="time-readout"><span>{formatTime(currentTime)}</span><span className="time-divider">/</span><span className="time-total">{formatTime(duration)}</span></div><button className="play-button" onClick={togglePlayback} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button><div className="transport-right"><button className="icon-button" aria-label="Audio volume"><Volume2 size={17} /></button><button className="quality-button">30 FPS <span>·</span> 720p</button></div></div>
         </section>
 

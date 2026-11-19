@@ -51,7 +51,9 @@ button { color: inherit; }
 .preview-label { color: #a7a4af; font-size: 9px; font-weight: 700; letter-spacing: 1px; display: flex; align-items: center; gap: 7px; }
 .live-dot { width: 5px; height: 5px; background: #9d78d4; border-radius: 50%; box-shadow: 0 0 7px #9d78d488; }
 .preview-resolution { color: #86838d; font-size: 9px; }.preview-resolution span { color: #4d4a54; padding: 0 4px; }
-.preview-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 5px 0 12px; }
+.preview-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 5px 0 12px; position: relative; }
+.viewer-play-button { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); width: 58px; height: 58px; display: grid; place-items: center; padding-left: 4px; color: #fff; background: #8057c5e8; border: 1px solid #ffffff55; border-radius: 50%; box-shadow: 0 5px 24px #0009; cursor: pointer; z-index: 2; }
+.viewer-play-button:hover { background: #956cd7; transform: translate(-50%,-50%) scale(1.06); }
 .player-frame { width: min(100%, calc((100vh - 390px) * 1.7778)); max-height: 100%; aspect-ratio: 16 / 9; overflow: hidden; background: #0b0c0f; box-shadow: 0 12px 40px #0006; }
 .player-frame > div { width: 100%; height: 100%; }
 .transport { height: 42px; flex: 0 0 42px; display: grid; grid-template-columns: 1fr 42px 1fr; align-items: center; }
