@@ -195,3 +195,13 @@ button { color: inherit; }
 .preview-stage.panning { cursor: grabbing; }
 .preview-stage .player-frame { will-change: transform; }
 @media (max-width: 1100px) { .workspace { grid-template-columns: 56px 210px minmax(340px,1fr); }.properties-panel { display: block; position: absolute; right: 0; top: 58px; bottom: 300px; width: 235px; z-index: 5; box-shadow: -12px 0 30px #0005; } }
+
+/* Expands the preview when an editor sidebar is toggled off. */
+.workspace.left-sidebar-hidden { grid-template-columns: minmax(380px,1fr) 260px; }
+.workspace.right-sidebar-hidden { grid-template-columns: 66px 250px minmax(380px,1fr); }
+.workspace.left-sidebar-hidden.right-sidebar-hidden { grid-template-columns: minmax(380px,1fr); }
+@media (max-width: 1100px) {
+  .workspace.left-sidebar-hidden { grid-template-columns: minmax(340px,1fr); }
+  .workspace.right-sidebar-hidden { grid-template-columns: 56px 210px minmax(340px,1fr); }
+  .workspace.left-sidebar-hidden.right-sidebar-hidden { grid-template-columns: minmax(340px,1fr); }
+}

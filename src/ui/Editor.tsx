@@ -38,6 +38,9 @@ export default function Editor() {
   const [projectList, setProjectList] = useState<ProjectSummary[]>([]);
   const [showProjects, setShowProjects] = useState(false);
   const [activeSidebarPanel, setActiveSidebarPanel] = useState<'media' | 'animations' | 'effects'>('media');
+  const [showLeftSidebar, setShowLeftSidebar] = useState(true);
+  const [showRightSidebar, setShowRightSidebar] = useState(true);
+  const [showTimeline, setShowTimeline] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [mediaError, setMediaError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -776,19 +779,31 @@ export default function Editor() {
     setSelectedClipIds([]);
   }, [selectedClipId, selectedClipIds]);
 
-  /** Deletes the current timeline selection when Backspace or Delete is pressed. */
+  /** Handles editor visibility, history, playback, and clip deletion shortcuts. */
   useEffect(() => {
     const handleEditorShortcut = (event: KeyboardEvent) => {
       const target = event.target;
       if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
       const command = event.metaKey || event.ctrlKey;
-      if (command && event.key.toLowerCase() === 'z') {
+      const key = event.key.toLowerCase();
+      if (command && key === 'k') {
+        event.preventDefault();
+        if (event.shiftKey) setShowRightSidebar((visible) => !visible);
+        else setShowLeftSidebar((visible) => !visible);
+        return;
+      }
+      if (command && key === 'm') {
+        event.preventDefault();
+        setShowTimeline((visible) => !visible);
+        return;
+      }
+      if (command && key === 'z') {
         event.preventDefault();
         if (event.shiftKey) redoProject();
         else undoProject();
         return;
       }
-      if (command && event.key.toLowerCase() === 'y') {
+      if (command && key === 'y') {
         event.preventDefault();
         redoProject();
         return;
@@ -923,10 +938,10 @@ export default function Editor() {
         onExport={exportVideo}
       />
 
-      <section className="workspace">
-        <aside className="left-rail"><button className={`rail-item ${activeSidebarPanel === 'media' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('media')}><Film size={18} /><span>Media</span></button><button className={`rail-item ${activeSidebarPanel === 'animations' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('animations')}><Sparkles size={18} /><span>Animations</span></button><button className={`rail-item ${activeSidebarPanel === 'effects' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('effects')}><SlidersHorizontal size={18} /><span>Effects</span></button><button className="rail-item" onClick={addTitle}><Type size={18} /><span>Text</span></button><button className="rail-item" onClick={addTitle}><Plus size={18} /><span>Title</span></button><button className="rail-item" onClick={() => fileInputRef.current?.click()}><AudioLines size={18} /><span>Audio</span></button></aside>
+      <section className={`workspace${showLeftSidebar ? '' : ' left-sidebar-hidden'}${showRightSidebar ? '' : ' right-sidebar-hidden'}`}>
+        {showLeftSidebar && <aside className="left-rail"><button className={`rail-item ${activeSidebarPanel === 'media' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('media')}><Film size={18} /><span>Media</span></button><button className={`rail-item ${activeSidebarPanel === 'animations' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('animations')}><Sparkles size={18} /><span>Animations</span></button><button className={`rail-item ${activeSidebarPanel === 'effects' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('effects')}><SlidersHorizontal size={18} /><span>Effects</span></button><button className="rail-item" onClick={addTitle}><Type size={18} /><span>Text</span></button><button className="rail-item" onClick={addTitle}><Plus size={18} /><span>Title</span></button><button className="rail-item" onClick={() => fileInputRef.current?.click()}><AudioLines size={18} /><span>Audio</span></button></aside>}
 
-        {activeSidebarPanel === 'media' ? <MediaPanel
+        {showLeftSidebar && (activeSidebarPanel === 'media' ? <MediaPanel
           assets={project.assets}
           mediaError={mediaError}
           fileInputRef={fileInputRef}
@@ -934,7 +949,7 @@ export default function Editor() {
           onImportFiles={(files) => void importFiles(files)}
           onImportProject={(file) => void importProjectFile(file)}
           onAddAsset={addAssetToTimeline}
-        /> : activeSidebarPanel === 'animations' ? <AnimationLibraryPanel selectedClip={selectedClip} onApply={applyAnimation} onRemove={removeAnimation} /> : <EffectsLibraryPanel selectedClip={selectedClip} onChangeEffects={updateClipEffects} />}
+        /> : activeSidebarPanel === 'animations' ? <AnimationLibraryPanel selectedClip={selectedClip} onApply={applyAnimation} onRemove={removeAnimation} /> : <EffectsLibraryPanel selectedClip={selectedClip} onChangeEffects={updateClipEffects} />)}
 
         <section className="preview-area">
           <div className="preview-header"><div className="preview-label"><span className="live-dot" /> CANVAS PREVIEW</div><div className="preview-resolution"><button className="viewer-zoom-step" aria-label="Zoom viewer out" title="Zoom out" onClick={() => adjustViewerZoom(-0.1)}><ZoomOut size={13} /></button><button className="viewer-zoom-reset" title="Reset viewer zoom" onClick={() => { setViewerZoom(1); setViewerPan({ x: 0, y: 0 }); }}>{Math.round(viewerZoom * 100)}%</button><button className="viewer-zoom-step" aria-label="Zoom viewer in" title="Zoom in" onClick={() => adjustViewerZoom(0.1)}><ZoomIn size={13} /></button> 1280 × 720 <span>·</span> {formatTime(currentTime)}</div></div>
@@ -942,10 +957,10 @@ export default function Editor() {
           <div className="transport"><div className="time-readout"><span>{formatTime(currentTime)}</span><span className="time-divider">/</span><span className="time-total">{formatTime(duration)}</span></div><button className="play-button" onClick={togglePlayback} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button><div className="transport-right"><button className="icon-button" aria-label="Audio volume"><Volume2 size={17} /></button><button className="quality-button">30 FPS <span>·</span> 720p</button></div></div>
         </section>
 
-        <aside className="properties-panel"><div className="panel-heading"><div><h2>Clip properties</h2><p>{selectedClip?.name ?? 'Select a clip on the timeline'}</p></div><Scissors size={17} className="muted-icon" /></div>{selectedClip ? <div className="properties-content"><label className="field-label">CLIP NAME<input value={selectedClip.name} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, name: event.target.value } : clip) }))} /></label><div className="property-grid"><label className="field-label">START<input type="number" min="0" step="0.1" value={selectedClip.start.toFixed(2)} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, start: Math.max(0, Number(event.target.value)) } : clip) }))} /></label><label className="field-label">DURATION<input type="number" min="0.25" step="0.1" value={selectedClip.duration.toFixed(2)} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, duration: Math.max(0.25, Number(event.target.value)) } : clip) }))} /></label></div><label className="field-label">TRACK<select value={selectedClip.track} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, track: event.target.value as TrackKind } : clip) }))}><option value="video">Video 1</option><option value="audio">Audio 1</option></select></label><button className="delete-clip" onClick={removeSelectedClip}><Trash2 size={14} /> Remove clip</button></div> : <div className="properties-empty"><span className="property-preview-icon"><Scissors size={22} /></span>Click a timeline clip to edit its name, start, duration, or track.</div>}</aside>
+        {showRightSidebar && <aside className="properties-panel"><div className="panel-heading"><div><h2>Clip properties</h2><p>{selectedClip?.name ?? 'Select a clip on the timeline'}</p></div><Scissors size={17} className="muted-icon" /></div>{selectedClip ? <div className="properties-content"><label className="field-label">CLIP NAME<input value={selectedClip.name} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, name: event.target.value } : clip) }))} /></label><div className="property-grid"><label className="field-label">START<input type="number" min="0" step="0.1" value={selectedClip.start.toFixed(2)} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, start: Math.max(0, Number(event.target.value)) } : clip) }))} /></label><label className="field-label">DURATION<input type="number" min="0.25" step="0.1" value={selectedClip.duration.toFixed(2)} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, duration: Math.max(0.25, Number(event.target.value)) } : clip) }))} /></label></div><label className="field-label">TRACK<select value={selectedClip.track} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, track: event.target.value as TrackKind } : clip) }))}><option value="video">Video 1</option><option value="audio">Audio 1</option></select></label><button className="delete-clip" onClick={removeSelectedClip}><Trash2 size={14} /> Remove clip</button></div> : <div className="properties-empty"><span className="property-preview-icon"><Scissors size={22} /></span>Click a timeline clip to edit its name, start, duration, or track.</div>}</aside>}
       </section>
 
-      <section className="timeline-section">
+      {showTimeline && <section className="timeline-section">
         <div className="timeline-toolbar"><div className="timeline-tools"><button className="tool-button selected" title="Drag over empty track space to select clips; drag a clip to move it"><span className="cursor-icon">↖</span></button><button className="tool-button" title="Split clip at playhead" onClick={() => { const clip = project.clips.find((item) => item.track === 'video' && currentTime > item.start && currentTime < item.start + item.duration); if (!clip) return; const firstDuration = currentTime - clip.start; const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: currentTime, sourceStart: clip.sourceStart + firstDuration, duration: clip.duration - firstDuration }; setProject((current) => ({ ...current, clips: [...current.clips.map((item) => item.id === clip.id ? { ...item, duration: firstDuration } : item), second] })); setSelectedClipId(second.id); setSelectedClipIds([second.id]); }}><Scissors size={15} /></button><span className="toolbar-separator" /><button className="tool-button" onClick={addTitle} title="Add title"><Type size={15} /></button><button className="tool-button" onClick={removeSelectedClip} title="Delete selected clip"><Trash2 size={15} /></button></div><div className="timeline-center">Timeline <span className="timeline-duration">{formatTime(duration)}</span></div><div className="zoom-control"><button className="tool-button" aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))}><ZoomOut size={15} /></button><input type="range" min="0.5" max="10" step="0.1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label={`Timeline zoom ${zoom.toFixed(1)} times`} /><span className="zoom-level">{zoom.toFixed(1)}×</span><button className="tool-button" aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(10, value + 0.15))}><ZoomIn size={15} /></button></div></div>
         <div className="timeline-body">
           <div className="track-labels"><div className="ruler-spacer" /><div className="track-label"><Video size={15} /><span>Video 1</span><span className="track-menu">···</span></div><div className="track-label"><Music2 size={15} /><span>Audio 1</span><span className="track-menu">···</span></div></div>
@@ -968,7 +983,7 @@ export default function Editor() {
           </div>
         </div>
         <div className="timeline-footer"><span><span className="kbd">Drag empty space</span> to select · drag clips to move · edge handles to trim · click ruler to seek</span><span>{selectedClipIds.length > 1 ? `${selectedClipIds.length} clips selected · ` : ''}{project.clips.length} clips · Autosaved to this browser {saving === 'saved' && <Check size={11} />}</span></div>
-      </section>
+      </section>}
 
       {showProjects && <div className="modal-backdrop" onClick={() => setShowProjects(false)}><section className="project-modal" onClick={(event) => event.stopPropagation()}><header><div><h2>Open a project</h2><p>Open a local project or import a portable project file.</p></div><button className="small-icon-button" onClick={() => setShowProjects(false)}>×</button></header><div className="project-modal-actions"><button className="new-project-row" onClick={() => { newProject(); setShowProjects(false); }}><FilePlus2 size={17} /> Create a new project</button><button className="new-project-row" onClick={() => projectInputRef.current?.click()}><Upload size={16} /> Import project file</button><button className="new-project-row" onClick={() => void exportProjectFile()}><Download size={16} /> Download project file</button></div>{projectList.map((item) => <div className="project-row" key={item.id}><button onClick={() => void openProject(item.id)}><Clapperboard size={16} /><span><strong>{item.name}</strong><small>Edited {new Date(item.updatedAt).toLocaleString()}</small></span></button>{item.id !== project.id && <button className="project-delete" title="Delete project" onClick={() => { void deleteProject(item.id).then(() => void showProjectPicker()); }}><Trash2 size={14} /></button>}</div>)}</section></div>}
     </main>
