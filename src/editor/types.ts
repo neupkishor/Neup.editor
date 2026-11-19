@@ -30,6 +30,7 @@ export type TimelineClip = {
   start: number;
   duration: number;
   sourceStart: number;
+  muted?: boolean;
   animation?: ClipAnimationEffect;
   effects?: ClipEffect[];
 };

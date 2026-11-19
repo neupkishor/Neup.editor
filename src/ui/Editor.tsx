@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { AudioLines, Check, Clapperboard, Download, FilePlus2, Film, Music2, Pause, Play, Plus, Scissors, SlidersHorizontal, Sparkles, Trash2, Type, Upload, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { AudioLines, Clapperboard, Download, FilePlus2, Film, Music2, Pause, Play, Plus, Scissors, SlidersHorizontal, Sparkles, Trash2, Type, Upload, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
 import { deleteProject, listProjects, loadProject, saveProject } from '../editor/storage';
 import { blobToDataUrl, createProject, dataUrlToBlob, formatTime, getMediaKind, readMediaDuration } from '../editor/helpers';
 import type { ClipEffect, EditorProject, MediaAsset, ProjectSummary, TimelineClip, TrackKind } from '../editor/types';
@@ -17,7 +17,20 @@ const FRAME_RATE = 30;
 
 type DragState = { clipId: string; mode: 'move' | 'left' | 'right'; pointerX: number; start: number; duration: number; sourceStart: number; maxDuration: number; track: TrackKind };
 type SelectionBox = { pointerId: number; startX: number; startY: number; currentX: number; currentY: number; left: number; top: number; width: number; height: number };
+type TimelineContextMenu = { x: number; y: number; clipId?: string; trackIndex?: number };
 type ProjectHistory = { projectId: string; past: EditorProject[]; present: EditorProject; future: EditorProject[]; pendingBefore: EditorProject | null; timer: number | null };
+type ExportResolution = '360p' | '480p' | '720p' | '1080p' | '2k' | '4k' | '240p';
+type ExportFormat = 'video/webm;codecs=vp9,opus' | 'video/webm;codecs=vp8,opus' | 'video/webm' | 'video/mp4;codecs=avc1.42E01E,mp4a.40.2' | 'video/mp4';
+
+const exportResolutions: Record<ExportResolution, { width: number; height: number; label: string }> = {
+  '240p': { width: 426, height: 240, label: '240p' },
+  '360p': { width: 640, height: 360, label: '360p' },
+  '480p': { width: 854, height: 480, label: '480p' },
+  '720p': { width: 1280, height: 720, label: '720p' },
+  '1080p': { width: 1920, height: 1080, label: '1080p' },
+  '2k': { width: 2560, height: 1440, label: '2K' },
+  '4k': { width: 3840, height: 2160, label: '4K' },
+};
 
 /** Returns the persisted lane number, treating older projects as lane one. */
 function clipTrackIndex(clip: TimelineClip): number {
@@ -40,9 +53,9 @@ function findOpenClipStart(clips: TimelineClip[], trackIndex: number, requestedS
     .sort((first, second) => Math.abs(first - requestedStart) - Math.abs(second - requestedStart))[0] ?? Math.max(gapStart, requestedStart);
 }
 
-/** Finds the highest existing lane that can fit a clip at its requested time. */
+/** Finds the first created lane that can fit a clip at its requested time. */
 function findAvailableTopTrack(clips: TimelineClip[], trackCount: number, start: number, duration: number): number {
-  for (let index = trackCount - 1; index >= 0; index -= 1) {
+  for (let index = 0; index < trackCount; index += 1) {
     const occupied = clips.some((clip) => clipTrackIndex(clip) === index && start < clip.start + clip.duration && start + duration > clip.start);
     if (!occupied) return index;
   }
@@ -78,7 +91,9 @@ export default function Editor() {
   const [viewerPanning, setViewerPanning] = useState(false);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
+  const [hoveredMediaAssetId, setHoveredMediaAssetId] = useState<string | null>(null);
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
+  const [timelineContextMenu, setTimelineContextMenu] = useState<TimelineContextMenu | null>(null);
   const [projectList, setProjectList] = useState<ProjectSummary[]>([]);
   const [showProjects, setShowProjects] = useState(false);
   const [activeSidebarPanel, setActiveSidebarPanel] = useState<'media' | 'animations' | 'effects'>('media');
@@ -86,6 +101,9 @@ export default function Editor() {
   const [showRightSidebar, setShowRightSidebar] = useState(true);
   const [showTimeline, setShowTimeline] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [showExportSettings, setShowExportSettings] = useState(false);
+  const [exportResolution, setExportResolution] = useState<ExportResolution>('720p');
+  const [exportFormat, setExportFormat] = useState<ExportFormat>(() => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' : 'video/webm;codecs=vp8,opus');
   const [mediaError, setMediaError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
@@ -97,8 +115,10 @@ export default function Editor() {
   const viewerPinchRef = useRef<{ distance: number; zoom: number; midpoint: { x: number; y: number }; pan: { x: number; y: number } } | null>(null);
   const viewerDragRef = useRef<{ pointerId: number; x: number; y: number; pan: { x: number; y: number } } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const exportCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const renderMediaRef = useRef<Map<string, HTMLVideoElement | HTMLImageElement>>(new Map());
   const imageRef = useRef<HTMLImageElement>(null);
   const effectCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const effectRendererRef = useRef<ReturnType<typeof createEffectRenderer> | undefined>(undefined);
@@ -108,9 +128,21 @@ export default function Editor() {
   const timeRef = useRef(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const exportChunksRef = useRef<Blob[]>([]);
+  const exportAudioContextRef = useRef<AudioContext | null>(null);
+  const exportAudioElementsRef = useRef<HTMLAudioElement[]>([]);
+  const exportTimersRef = useRef<number[]>([]);
+  const currentExportTimeRef = useRef(0);
+  const exportingRef = useRef(false);
   const historyRef = useRef<ProjectHistory | null>(null);
   const canUndo = Boolean(historyRef.current?.past.length || historyRef.current?.pendingBefore);
   const canRedo = Boolean(historyRef.current?.future.length);
+  const exportFormatOptions: Array<{ value: ExportFormat; label: string }> = [
+    { value: 'video/webm;codecs=vp9,opus', label: 'WebM · VP9' },
+    { value: 'video/webm;codecs=vp8,opus', label: 'WebM · VP8' },
+    { value: 'video/webm', label: 'WebM' },
+    { value: 'video/mp4;codecs=avc1.42E01E,mp4a.40.2', label: 'MP4 · H.264' },
+    { value: 'video/mp4', label: 'MP4' },
+  ];
 
   const assetUrls = useMemo(() => {
     const urls = new Map<string, string>();
@@ -120,13 +152,52 @@ export default function Editor() {
     return urls;
   }, [project.assets]);
   const duration = useMemo(() => project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0), [project.clips]);
-  const activeVideo = project.clips.filter((clip) => clip.track === 'video' && currentTime >= clip.start && currentTime < clip.start + clip.duration).sort((first, second) => clipTrackIndex(second) - clipTrackIndex(first))[0];
-  const activeAudio = project.clips.find((clip) => clip.track === 'audio' && currentTime >= clip.start && currentTime < clip.start + clip.duration);
+  const activeVideo = project.clips.filter((clip) => clip.track === 'video' && currentTime >= clip.start && currentTime < clip.start + clip.duration).sort((first, second) => clipTrackIndex(first) - clipTrackIndex(second))[0];
+  const activeAudioClips = project.clips.filter((clip) => clip.track === 'audio' && currentTime >= clip.start && currentTime < clip.start + clip.duration);
+  const activeAudio = activeVideo?.muted ? activeAudioClips.find((clip) => clip.assetId === activeVideo.assetId) ?? activeAudioClips[0] : activeAudioClips[0];
   const activeVideoAsset = project.assets.find((asset) => asset.id === activeVideo?.assetId);
   const activeAudioAsset = project.assets.find((asset) => asset.id === activeAudio?.assetId);
   const selectedClip = project.clips.find((clip) => clip.id === selectedClipId);
+  const contextMenuClip = timelineContextMenu?.clipId ? project.clips.find((clip) => clip.id === timelineContextMenu.clipId) : undefined;
+  const contextMenuTrackIndex = timelineContextMenu?.trackIndex;
+  const contextMenuAsset = project.assets.find((asset) => asset.id === contextMenuClip?.assetId);
+  const usedAssetIds = useMemo(() => new Set(project.clips.map((clip) => clip.assetId)), [project.clips]);
   const trackRows = useMemo(() => Array.from({ length: Math.max(1, project.trackCount ?? 1, ...project.clips.map((clip) => clipTrackIndex(clip) + 1)) }, (_, index) => index), [project.clips, project.trackCount]);
   const timelineWidth = Math.max(800, (duration + 12) * PIXELS_PER_SECOND * zoom);
+
+  /** Loads and synchronizes media elements for every asset that can appear in a stacked video composite. */
+  useEffect(() => {
+    const videoClips = project.clips.filter((clip) => clip.track === 'video');
+    const activeVideoClips = videoClips.filter((clip) => currentTime >= clip.start && currentTime < clip.start + clip.duration);
+    for (const clip of videoClips) {
+      const asset = project.assets.find((item) => item.id === clip.assetId);
+      const url = assetUrls.get(clip.assetId);
+      if (!asset || !url || asset.kind === 'audio' || asset.kind === 'title') continue;
+      let source = renderMediaRef.current.get(clip.id);
+      if (!source) {
+        source = asset.kind === 'image' ? new Image() : document.createElement('video');
+        if (source instanceof HTMLVideoElement) { source.muted = true; source.playsInline = true; }
+        source.addEventListener('loadeddata', () => setPreviewRevision((revision) => revision + 1));
+        source.addEventListener('load', () => setPreviewRevision((revision) => revision + 1));
+        renderMediaRef.current.set(clip.id, source);
+      }
+      if (source.src !== url) source.src = url;
+      if (source instanceof HTMLVideoElement) {
+        source.preload = 'auto';
+        const sourceTime = Math.max(0, clip.sourceStart + currentTime - clip.start);
+        if (Math.abs(source.currentTime - sourceTime) > 0.2) source.currentTime = sourceTime;
+        if (playing && activeVideoClips.some((active) => active.id === clip.id)) void source.play().catch(() => undefined);
+        else source.pause();
+      }
+    }
+    const projectClipIds = new Set(videoClips.map((clip) => clip.id));
+    for (const [clipId, source] of renderMediaRef.current) {
+      if (!projectClipIds.has(clipId)) {
+        if (source instanceof HTMLVideoElement) source.pause();
+        renderMediaRef.current.delete(clipId);
+      }
+    }
+  }, [assetUrls, currentTime, playing, project.assets, project.clips]);
 
   /** Saves the current project and timeline viewport immediately. */
   const saveNow = () => {
@@ -326,6 +397,7 @@ export default function Editor() {
 
   /** Starts a paint style selection box when dragging over empty track space. */
   const beginTimelineSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
     if (event.pointerType === 'touch') {
       trackTouchPointer(event);
       return;
@@ -568,11 +640,12 @@ export default function Editor() {
     const video = videoRef.current;
     const videoUrl = activeVideoAsset ? assetUrls.get(activeVideoAsset.id) : undefined;
     if (video) {
+      video.muted = exporting || (activeVideo?.muted ?? false);
       if (videoUrl && video.src !== videoUrl) video.src = videoUrl;
       if (!videoUrl) video.removeAttribute('src');
       const sourceTime = (activeVideo?.sourceStart ?? 0) + currentTime - (activeVideo?.start ?? 0);
       if (videoUrl && Math.abs(video.currentTime - sourceTime) > 0.35) video.currentTime = Math.max(0, sourceTime);
-      if (playing && videoUrl) void video.play().catch(() => undefined);
+      if (playing && !exporting && videoUrl) void video.play().catch(() => undefined);
       else video.pause();
     }
     const audio = audioRef.current;
@@ -582,62 +655,69 @@ export default function Editor() {
       if (!audioUrl) audio.removeAttribute('src');
       const sourceTime = (activeAudio?.sourceStart ?? 0) + currentTime - (activeAudio?.start ?? 0);
       if (audioUrl && Math.abs(audio.currentTime - sourceTime) > 0.35) audio.currentTime = Math.max(0, sourceTime);
-      if (playing && audioUrl) void audio.play().catch(() => undefined);
+      if (playing && !exporting && audioUrl) void audio.play().catch(() => undefined);
       else audio.pause();
     }
-  }, [activeAudio, activeAudioAsset, activeVideo, activeVideoAsset, assetUrls, currentTime, playing]);
+  }, [activeAudio, activeAudioAsset, activeVideo, activeVideoAsset, assetUrls, currentTime, exporting, playing]);
 
-  /** Draws the active clip into the canvas used by both preview and export. */
+  /** Draws every active video lane from bottom to top into the shared preview and export canvas. */
   useEffect(() => {
     let animation = 0;
     const draw = () => {
-      const canvas = canvasRef.current;
-      const context = canvas?.getContext('2d');
-      if (!canvas || !context) return;
-      context.fillStyle = '#0e1015';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      const active = project.clips.filter((clip) => clip.track === 'video' && currentTime >= clip.start && currentTime < clip.start + clip.duration).sort((first, second) => clipTrackIndex(second) - clipTrackIndex(first))[0];
-      const asset = project.assets.find((item) => item.id === active?.assetId);
-      if (!active || !asset) {
-        drawWelcomeCard(context, canvas.width, canvas.height, project.name);
-      } else {
-        const transform = getClipAnimationTransform(active, currentTime);
-        const effectCanvas = effectCanvasRef.current ?? document.createElement('canvas');
-        effectCanvasRef.current = effectCanvas;
-        if (effectCanvas.width !== canvas.width) effectCanvas.width = canvas.width;
-        if (effectCanvas.height !== canvas.height) effectCanvas.height = canvas.height;
-        const effectContext = effectCanvas.getContext('2d');
-        if (!effectContext) return;
-        effectContext.clearRect(0, 0, effectCanvas.width, effectCanvas.height);
-        if (effectRendererRef.current === undefined) effectRendererRef.current = createEffectRenderer();
-        const renderer = effectRendererRef.current;
-        effectContext.save();
-        effectContext.globalAlpha = transform.opacity / 100;
-        effectContext.translate(canvas.width / 2 + transform.x * canvas.width / 100, canvas.height / 2 + transform.y * canvas.height / 100);
-        effectContext.rotate(transform.rotation * Math.PI / 180);
-        effectContext.scale(transform.scale / 100, transform.scale / 100);
-        effectContext.translate(-canvas.width / 2, -canvas.height / 2);
-        effectContext.filter = 'none';
-        applyAnimationMask(effectContext, canvas.width, canvas.height, transform.mask, transform.reveal);
-        if (asset.kind === 'title') {
-          drawTitleCard(effectContext, canvas.width, canvas.height, active.name);
-        } else if (asset.kind === 'image' && imageRef.current?.complete && imageRef.current.naturalWidth) {
-          drawContained(effectContext, imageRef.current, canvas.width, canvas.height);
-        } else if (asset.kind === 'video' && videoRef.current?.readyState && videoRef.current.readyState >= 2) {
-          drawContained(effectContext, videoRef.current, canvas.width, canvas.height);
-        }
-        effectContext.restore();
-        if (renderer && (active.effects?.length || transform.blur > 0)) {
-          context.drawImage(renderer.render(effectCanvas, active.effects ?? [], transform.blur), 0, 0);
+      const canvases = [canvasRef.current].filter((item): item is HTMLCanvasElement => Boolean(item));
+      const activeClips = project.clips.filter((clip) => clip.track === 'video' && currentTime >= clip.start && currentTime < clip.start + clip.duration).sort((first, second) => clipTrackIndex(second) - clipTrackIndex(first));
+      for (const canvas of canvases) {
+        const context = canvas.getContext('2d');
+        if (!context) continue;
+        context.fillStyle = '#0e1015';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        if (!activeClips.length) {
+          drawWelcomeCard(context, canvas.width, canvas.height, project.name);
         } else {
-          if (!renderer) applyEffectFallback(effectCanvas, active.effects ?? [], transform.blur);
-          context.drawImage(effectCanvas, 0, 0);
+          const effectCanvas = effectCanvasRef.current ?? document.createElement('canvas');
+          effectCanvasRef.current = effectCanvas;
+          if (effectCanvas.width !== canvas.width) effectCanvas.width = canvas.width;
+          if (effectCanvas.height !== canvas.height) effectCanvas.height = canvas.height;
+          const effectContext = effectCanvas.getContext('2d');
+          if (!effectContext) continue;
+          if (effectRendererRef.current === undefined) effectRendererRef.current = createEffectRenderer();
+          const renderer = effectRendererRef.current;
+          for (const active of activeClips) {
+            const asset = project.assets.find((item) => item.id === active.assetId);
+            if (!asset) continue;
+            const transform = getClipAnimationTransform(active, currentTime);
+            effectContext.clearRect(0, 0, effectCanvas.width, effectCanvas.height);
+            effectContext.save();
+            effectContext.globalAlpha = transform.opacity / 100;
+            effectContext.translate(canvas.width / 2 + transform.x * canvas.width / 100, canvas.height / 2 + transform.y * canvas.height / 100);
+            effectContext.rotate(transform.rotation * Math.PI / 180);
+            effectContext.scale(transform.scale / 100, transform.scale / 100);
+            effectContext.translate(-canvas.width / 2, -canvas.height / 2);
+            effectContext.filter = 'none';
+            applyAnimationMask(effectContext, canvas.width, canvas.height, transform.mask, transform.reveal);
+            if (asset.kind === 'title') {
+              drawTitleCard(effectContext, canvas.width, canvas.height, active.name);
+            } else if (asset.kind === 'image') {
+              const image = renderMediaRef.current.get(active.id);
+              if (image instanceof HTMLImageElement && image.complete && image.naturalWidth) drawContained(effectContext, image, canvas.width, canvas.height);
+            } else if (asset.kind === 'video') {
+              const video = renderMediaRef.current.get(active.id);
+              if (video instanceof HTMLVideoElement && video.readyState >= 2) drawContained(effectContext, video, canvas.width, canvas.height);
+            }
+            effectContext.restore();
+            if (renderer && (active.effects?.length || transform.blur > 0)) {
+              context.drawImage(renderer.render(effectCanvas, active.effects ?? [], transform.blur), 0, 0, canvas.width, canvas.height);
+            } else {
+              if (!renderer) applyEffectFallback(effectCanvas, active.effects ?? [], transform.blur);
+              context.drawImage(effectCanvas, 0, 0);
+            }
+          }
         }
       }
     };
     animation = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(animation);
-  }, [currentTime, previewRevision, project.assets, project.clips, project.name]);
+  }, [currentTime, exporting, previewRevision, project.assets, project.clips, project.name]);
 
   /** Advances the playhead with wall clock time and stops at the sequence end. */
   useEffect(() => {
@@ -650,12 +730,14 @@ export default function Editor() {
       previous = now;
       if (nextTime >= duration) {
         timeRef.current = duration;
+        currentExportTimeRef.current = duration;
         setCurrentTime(duration);
         setPlaying(false);
-        if (exporting) recorderRef.current?.stop();
+        if (exportingRef.current) recorderRef.current?.stop();
         return;
       }
       timeRef.current = nextTime;
+      if (exportingRef.current) currentExportTimeRef.current = nextTime;
       if (now - lastPaint > 32) { setCurrentTime(nextTime); lastPaint = now; }
       animation = requestAnimationFrame(tick);
     };
@@ -716,6 +798,14 @@ export default function Editor() {
     setSelectedClipId(clip.id);
     setSelectedClipIds([clip.id]);
   }, [currentTime]);
+
+  /** Removes a media asset and every timeline clip that references it. */
+  const deleteMediaAsset = useCallback((assetId: string) => {
+    const removedClipIds = project.clips.filter((clip) => clip.assetId === assetId).map((clip) => clip.id);
+    setProject((current) => ({ ...current, assets: current.assets.filter((asset) => asset.id !== assetId), clips: current.clips.filter((clip) => clip.assetId !== assetId) }));
+    setSelectedClipId((id) => id && removedClipIds.includes(id) ? null : id);
+    setSelectedClipIds((ids) => ids.filter((id) => !removedClipIds.includes(id)));
+  }, [project.clips]);
 
   /** Adds another shared timeline lane for any kind of clip. */
   const addTrack = () => {
@@ -833,6 +923,86 @@ export default function Editor() {
     setSelectedClipIds([]);
   }, [selectedClipId, selectedClipIds]);
 
+  /** Opens a small context menu for the clip or timeline region under the pointer. */
+  const openTimelineContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const clipElement = event.target instanceof Element ? event.target.closest<HTMLElement>('.timeline-clip') : null;
+    const clipId = clipElement?.dataset.clipId;
+    if (clipId) {
+      setSelectedClipId(clipId);
+      setSelectedClipIds([clipId]);
+    }
+    setTimelineContextMenu({ x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 190), clipId });
+  };
+
+  /** Opens track actions from the track-name gutter. */
+  const openTrackContextMenu = (event: ReactMouseEvent<HTMLDivElement>, trackIndex: number) => {
+    event.preventDefault();
+    setTimelineContextMenu({ x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 120), trackIndex });
+  };
+
+  /** Deletes a lane, removes its clips, and shifts later lanes up while keeping one lane. */
+  const deleteTrack = (trackIndex: number) => {
+    if (trackRows.length <= 1) return;
+    const deletedClipIds = project.clips.filter((clip) => clipTrackIndex(clip) === trackIndex).map((clip) => clip.id);
+    setProject((current) => {
+      const laneCount = Math.max(1, current.trackCount ?? 1, ...current.clips.map((clip) => clipTrackIndex(clip) + 1));
+      return {
+        ...current,
+        trackCount: Math.max(1, laneCount - 1),
+        clips: current.clips.filter((clip) => clipTrackIndex(clip) !== trackIndex).map((clip) => clipTrackIndex(clip) > trackIndex ? { ...clip, trackIndex: clipTrackIndex(clip) - 1 } : clip),
+      };
+    });
+    setSelectedClipId((id) => id && deletedClipIds.includes(id) ? null : id);
+    setSelectedClipIds((ids) => ids.filter((id) => !deletedClipIds.includes(id)));
+    setTimelineContextMenu(null);
+  };
+
+  /** Splits the chosen timeline clip at the current playhead position. */
+  const splitClipAtPlayhead = (clipId: string) => {
+    const clip = project.clips.find((item) => item.id === clipId);
+    if (!clip || currentTime <= clip.start || currentTime >= clip.start + clip.duration) return;
+    const firstDuration = currentTime - clip.start;
+    const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: currentTime, sourceStart: clip.sourceStart + firstDuration, duration: clip.duration - firstDuration };
+    setProject((current) => ({ ...current, clips: [...current.clips.map((item) => item.id === clip.id ? { ...item, duration: firstDuration } : item), second] }));
+    setSelectedClipId(second.id);
+    setSelectedClipIds([second.id]);
+  };
+
+  /** Separates a video's soundtrack into a synchronized audio clip and mutes its picture clip. */
+  const separateAudioFromVideo = (clipId: string) => {
+    const sourceClip = project.clips.find((clip) => clip.id === clipId);
+    const asset = project.assets.find((item) => item.id === sourceClip?.assetId);
+    if (!sourceClip || sourceClip.track !== 'video' || asset?.kind !== 'video' || sourceClip.muted) return;
+    const audioClipId = crypto.randomUUID();
+    setProject((current) => {
+      const source = current.clips.find((clip) => clip.id === clipId);
+      if (!source) return current;
+      const laneCount = Math.max(current.trackCount ?? 1, ...current.clips.map((clip) => clipTrackIndex(clip) + 1));
+      const trackIndex = findAvailableTopTrack(current.clips, laneCount, source.start, source.duration);
+      const audioClip: TimelineClip = { id: audioClipId, assetId: source.assetId, name: `${source.name} audio`, track: 'audio', trackIndex, start: source.start, duration: source.duration, sourceStart: source.sourceStart };
+      return { ...current, trackCount: Math.max(laneCount, trackIndex + 1), clips: [...current.clips.map((clip) => clip.id === clipId ? { ...clip, muted: true } : clip), audioClip] };
+    });
+    setSelectedClipId(audioClipId);
+    setSelectedClipIds([audioClipId]);
+  };
+
+  /** Dismisses the timeline menu when focus moves elsewhere or Escape is pressed. */
+  useEffect(() => {
+    if (!timelineContextMenu) return;
+    const dismissMenu = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.timeline-context-menu')) return;
+      setTimelineContextMenu(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setTimelineContextMenu(null); };
+    window.addEventListener('pointerdown', dismissMenu);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', dismissMenu);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [timelineContextMenu]);
+
   /** Handles editor visibility, history, playback, and clip deletion shortcuts. */
   useEffect(() => {
     const handleEditorShortcut = (event: KeyboardEvent) => {
@@ -878,6 +1048,7 @@ export default function Editor() {
 
   /** Starts moving or trimming a clip based on the pointer target. */
   const beginClipDrag = (event: ReactPointerEvent<HTMLElement>, clip: TimelineClip, mode: DragState['mode']) => {
+    if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
     setSelectedClipId(clip.id);
@@ -915,40 +1086,159 @@ export default function Editor() {
   /** Completes a pointer driven clip move or trim operation. */
   const endClipDrag = () => { dragRef.current = null; };
 
-  /** Records the canvas preview and active audio track to a downloadable WebM. */
-  const exportVideo = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !duration) return;
-    if (!('MediaRecorder' in window) || !canvas.captureStream) { setMediaError('Video export is not supported by this browser.'); return; }
-    const stream = canvas.captureStream(30);
-    const video = videoRef.current as (HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream }) | null;
-    const videoStream = video?.captureStream?.() ?? video?.mozCaptureStream?.();
-    videoStream?.getAudioTracks().forEach((track) => stream.addTrack(track));
-    const audio = audioRef.current as (HTMLAudioElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream }) | null;
-    const audioStream = audio?.captureStream?.() ?? audio?.mozCaptureStream?.();
-    audioStream?.getAudioTracks().forEach((track) => stream.addTrack(track));
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' : 'video/webm';
-    const recorder = new MediaRecorder(stream, { mimeType });
-    recorderRef.current = recorder;
-    exportChunksRef.current = [];
-    recorder.ondataavailable = (event) => { if (event.data.size) exportChunksRef.current.push(event.data); };
-    recorder.onstop = () => {
-      const blob = new Blob(exportChunksRef.current, { type: mimeType });
-      const downloadUrl = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = `${project.name.replace(/[^a-z0-9-]+/gi, '-').toLowerCase() || 'video'}.webm`;
-      link.click();
-      URL.revokeObjectURL(downloadUrl);
+  /** Opens export options before creating the downloadable render. */
+  const exportVideo = useCallback(() => setShowExportSettings(true), []);
+
+  /** Records the timeline composite and mixes every audible clip at the selected output size and codec. */
+  const startVideoExport = useCallback(async () => {
+    const settings = exportResolutions[exportResolution];
+    if (!duration) return;
+    if (!('MediaRecorder' in window) || !HTMLCanvasElement.prototype.captureStream) { setMediaError('Video export is not supported by this browser.'); return; }
+    if (!MediaRecorder.isTypeSupported(exportFormat)) { setMediaError(`${exportFormat.startsWith('video/mp4') ? 'MP4' : 'WebM'} export is not supported by this browser. Choose a supported format.`); return; }
+
+    const output = document.createElement('canvas');
+    output.width = settings.width;
+    output.height = settings.height;
+    exportCanvasRef.current = output;
+    const audioContext = new AudioContext();
+    const audioDestination = audioContext.createMediaStreamDestination();
+    exportAudioContextRef.current = audioContext;
+    const stream = output.captureStream(30);
+    audioDestination.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
+    const cleanup = () => {
+      exportTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      exportTimersRef.current = [];
+      exportAudioElementsRef.current.forEach((element) => { element.pause(); element.removeAttribute('src'); });
+      exportAudioElementsRef.current = [];
+      void audioContext.close();
+      exportAudioContextRef.current = null;
+      exportCanvasRef.current = null;
       stream.getTracks().forEach((track) => track.stop());
       setExporting(false);
     };
-    setMediaError('');
-    setExporting(true);
-    seekTo(0);
-    recorder.start(250);
-    setPlaying(true);
-  }, [duration, project.name, seekTo]);
+    try {
+      await audioContext.resume();
+      setMediaError('');
+      setShowExportSettings(false);
+      setExporting(true);
+      setPlaying(false);
+      seekTo(0);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      const mediaReadiness = project.clips.filter((clip) => clip.track === 'video').map((clip) => renderMediaRef.current.get(clip.id)).filter((source): source is HTMLVideoElement | HTMLImageElement => Boolean(source));
+      await Promise.all(mediaReadiness.map((source) => {
+        if (source instanceof HTMLVideoElement && source.readyState >= 2) return Promise.resolve();
+        if (source instanceof HTMLImageElement && source.complete && source.naturalWidth) return Promise.resolve();
+        return new Promise<void>((resolve, reject) => {
+          const readyEvent = source instanceof HTMLVideoElement ? 'loadeddata' : 'load';
+          const errorEvent = 'error';
+          const timeout = window.setTimeout(() => finish(new Error('Timed out waiting for timeline media to load.')), 15000);
+          const finish = (error?: Error) => {
+            window.clearTimeout(timeout);
+            source.removeEventListener(readyEvent, onReady);
+            source.removeEventListener(errorEvent, onError);
+            if (error) reject(error); else resolve();
+          };
+          const onReady = () => finish();
+          const onError = () => finish(new Error('A timeline media file could not be loaded for export.'));
+          source.addEventListener(readyEvent, onReady, { once: true });
+          source.addEventListener(errorEvent, onError, { once: true });
+        });
+      }));
+      const clipsWithSound = project.clips.filter((clip) => {
+        const asset = project.assets.find((item) => item.id === clip.assetId);
+        return asset?.blob && (clip.track === 'audio' || (clip.track === 'video' && asset.kind === 'video' && !clip.muted));
+      });
+      for (const clip of clipsWithSound) {
+        const asset = project.assets.find((item) => item.id === clip.assetId);
+        if (!asset?.blob) continue;
+        const url = assetUrls.get(asset.id);
+        if (!url) continue;
+        const element = new Audio(url);
+        element.preload = 'auto';
+        const source = audioContext.createMediaElementSource(element);
+        source.connect(audioDestination);
+        exportAudioElementsRef.current.push(element);
+        const startTimer = window.setTimeout(() => {
+          element.currentTime = clip.sourceStart;
+          void element.play().catch(() => undefined);
+        }, clip.start * 1000);
+        const stopTimer = window.setTimeout(() => element.pause(), (clip.start + clip.duration) * 1000);
+        exportTimersRef.current.push(startTimer, stopTimer);
+      }
+      const outputContext = output.getContext('2d');
+      if (outputContext) {
+        const layerCanvas = document.createElement('canvas');
+        layerCanvas.width = output.width;
+        layerCanvas.height = output.height;
+        const layerContext = layerCanvas.getContext('2d');
+        const drawExportFrame = () => {
+          const active = project.clips.filter((clip) => clip.track === 'video' && currentExportTimeRef.current >= clip.start && currentExportTimeRef.current < clip.start + clip.duration).sort((a, b) => clipTrackIndex(b) - clipTrackIndex(a));
+          outputContext.fillStyle = '#0e1015';
+          outputContext.fillRect(0, 0, output.width, output.height);
+          if (!active.length) drawWelcomeCard(outputContext, output.width, output.height, project.name);
+          for (const clip of active) {
+            const asset = project.assets.find((item) => item.id === clip.assetId);
+            if (!asset || !layerContext) continue;
+            layerContext.clearRect(0, 0, layerCanvas.width, layerCanvas.height);
+            const transform = getClipAnimationTransform(clip, currentExportTimeRef.current);
+            layerContext.save();
+            layerContext.globalAlpha = transform.opacity / 100;
+            layerContext.translate(layerCanvas.width / 2 + transform.x * layerCanvas.width / 100, layerCanvas.height / 2 + transform.y * layerCanvas.height / 100);
+            layerContext.rotate(transform.rotation * Math.PI / 180);
+            layerContext.scale(transform.scale / 100, transform.scale / 100);
+            layerContext.translate(-layerCanvas.width / 2, -layerCanvas.height / 2);
+            applyAnimationMask(layerContext, layerCanvas.width, layerCanvas.height, transform.mask, transform.reveal);
+            if (asset.kind === 'title') drawTitleCard(layerContext, layerCanvas.width, layerCanvas.height, clip.name);
+            else if (asset.kind === 'image') {
+              const image = renderMediaRef.current.get(clip.id);
+              if (image instanceof HTMLImageElement && image.complete && image.naturalWidth) drawContained(layerContext, image, layerCanvas.width, layerCanvas.height);
+            } else if (asset.kind === 'video') {
+              const video = renderMediaRef.current.get(clip.id);
+              if (video instanceof HTMLVideoElement && video.readyState >= 2) drawContained(layerContext, video, layerCanvas.width, layerCanvas.height);
+            }
+            layerContext.restore();
+            if (clip.effects?.length || transform.blur > 0) {
+              if (effectRendererRef.current === undefined) effectRendererRef.current = createEffectRenderer();
+              const renderer = effectRendererRef.current;
+              if (renderer) outputContext.drawImage(renderer.render(layerCanvas, clip.effects ?? [], transform.blur), 0, 0, output.width, output.height);
+              else {
+                applyEffectFallback(layerCanvas, clip.effects ?? [], transform.blur);
+                outputContext.drawImage(layerCanvas, 0, 0);
+              }
+            } else outputContext.drawImage(layerCanvas, 0, 0);
+          }
+          if (currentExportTimeRef.current < duration && exportingRef.current) requestAnimationFrame(drawExportFrame);
+        };
+        currentExportTimeRef.current = 0;
+        exportingRef.current = true;
+        drawExportFrame();
+      }
+      const recorder = new MediaRecorder(stream, { mimeType: exportFormat });
+      recorderRef.current = recorder;
+      exportChunksRef.current = [];
+      recorder.ondataavailable = (event) => { if (event.data.size) exportChunksRef.current.push(event.data); };
+      recorder.onstop = () => {
+        const blob = new Blob(exportChunksRef.current, { type: exportFormat });
+        const downloadUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        const extension = exportFormat.startsWith('video/mp4') ? 'mp4' : 'webm';
+        link.download = `${project.name.replace(/[^a-z0-9-]+/gi, '-').toLowerCase() || 'video'}.${extension}`;
+        link.click();
+        URL.revokeObjectURL(downloadUrl);
+        exportingRef.current = false;
+        cleanup();
+      };
+      recorder.onerror = () => { exportingRef.current = false; cleanup(); setMediaError('The browser could not finish encoding this export.'); };
+      recorder.start(250);
+      exportingRef.current = true;
+      setPlaying(true);
+    } catch (error) {
+      exportingRef.current = false;
+      cleanup();
+      setMediaError(error instanceof Error ? `Could not start export: ${error.message}` : 'Could not start export.');
+    }
+  }, [assetUrls, currentTime, duration, exportFormat, exportResolution, project, seekTo]);
 
   /** Draws an image or video source centered while keeping its aspect ratio. */
   function drawContained(context: CanvasRenderingContext2D, source: CanvasImageSource & { width?: number; height?: number; videoWidth?: number; videoHeight?: number; naturalWidth?: number; naturalHeight?: number }, width: number, height: number) {
@@ -1008,6 +1298,9 @@ export default function Editor() {
           onImportFiles={(files) => void importFiles(files)}
           onImportProject={(file) => void importProjectFile(file)}
           onAddAsset={addAssetToTimeline}
+          usedAssetIds={usedAssetIds}
+          onDeleteAsset={deleteMediaAsset}
+          onHoverAsset={setHoveredMediaAssetId}
         /> : activeSidebarPanel === 'animations' ? <AnimationLibraryPanel selectedClip={selectedClip} onApply={applyAnimation} onRemove={removeAnimation} /> : <EffectsLibraryPanel selectedClip={selectedClip} onChangeEffects={updateClipEffects} />)}
 
         <section className="preview-area">
@@ -1022,14 +1315,17 @@ export default function Editor() {
       {showTimeline && <section className="timeline-section">
         <div className="timeline-toolbar"><div className="timeline-tools"><button className="tool-button selected" title="Drag over empty track space to select clips; drag a clip to move it"><span className="cursor-icon">↖</span></button><button className="tool-button" title="Split clip at playhead" onClick={() => { const clip = project.clips.find((item) => item.track === 'video' && currentTime > item.start && currentTime < item.start + item.duration); if (!clip) return; const firstDuration = currentTime - clip.start; const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: currentTime, sourceStart: clip.sourceStart + firstDuration, duration: clip.duration - firstDuration }; setProject((current) => ({ ...current, clips: [...current.clips.map((item) => item.id === clip.id ? { ...item, duration: firstDuration } : item), second] })); setSelectedClipId(second.id); setSelectedClipIds([second.id]); }}><Scissors size={15} /></button><span className="toolbar-separator" /><button className="tool-button track-add-button" onClick={addTrack} title="Add track"><Plus size={15} /></button><button className="tool-button" onClick={addTitle} title="Add title"><Type size={15} /></button><button className="tool-button" onClick={removeSelectedClip} title="Delete selected clip"><Trash2 size={15} /></button></div><div className="timeline-center">Timeline <span className="timeline-duration">{formatTime(duration)}</span></div><div className="zoom-control"><button className="tool-button" aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))}><ZoomOut size={15} /></button><input type="range" min="0.5" max="10" step="0.1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label={`Timeline zoom ${zoom.toFixed(1)} times`} /><span className="zoom-level">{zoom.toFixed(1)}×</span><button className="tool-button" aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(10, value + 0.15))}><ZoomIn size={15} /></button></div></div>
         <div className="timeline-body">
-          <div className="track-labels"><div className="ruler-spacer" /><div className="track-label-rows" style={{ transform: `translateY(-${timelineScrollTop}px)` }}>{[...trackRows].reverse().map((index) => <div className="track-label" key={index}><span>Track {index + 1}</span><span className="track-menu">···</span></div>)}</div></div>
-          <div ref={timelineScrollRef} className="timeline-scroll" onScroll={(event) => { setTimelineScrollLeft(event.currentTarget.scrollLeft); setTimelineScrollTop(event.currentTarget.scrollTop); }} onPointerDownCapture={beginTimelineSelection} onPointerMoveCapture={updateTimelineSelection} onPointerUpCapture={(event) => finishTimelineSelection(event, true)} onPointerCancelCapture={(event) => finishTimelineSelection(event, false)}>
-            <div className="timeline-inner" style={{ width: timelineWidth }} onPointerDown={(event) => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('ruler')) { const bounds = event.currentTarget.getBoundingClientRect(); seekTo(Math.max(0, (event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom))); } }}>
-              <div className="ruler">{Array.from({ length: Math.ceil(duration / 5) + 3 }, (_, index) => <button className="ruler-tick" key={index} style={{ left: `${index * 5 * PIXELS_PER_SECOND * zoom}px` }} onClick={() => seekTo(index * 5)}>{`00:${String(index * 5).padStart(2, '0')}`}</button>)}</div>
-              {[...trackRows].reverse().map((index) => <div key={index} className="track-lane" onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>
+          <div className="track-labels"><div className="ruler-spacer" /><div className="track-label-rows" style={{ transform: `translateY(-${timelineScrollTop}px)` }}>{trackRows.map((index) => <div className="track-label" key={index} onContextMenu={(event) => openTrackContextMenu(event, index)}><span>Track {index + 1}</span><span className="track-menu">···</span></div>)}</div></div>
+          <div ref={timelineScrollRef} className="timeline-scroll" onContextMenu={openTimelineContextMenu} onScroll={(event) => { setTimelineScrollLeft(event.currentTarget.scrollLeft); setTimelineScrollTop(event.currentTarget.scrollTop); }} onPointerDownCapture={beginTimelineSelection} onPointerMoveCapture={updateTimelineSelection} onPointerUpCapture={(event) => finishTimelineSelection(event, true)} onPointerCancelCapture={(event) => finishTimelineSelection(event, false)}>
+            <div className="timeline-inner" style={{ width: timelineWidth }}>
+              <div className="ruler" onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); const bounds = event.currentTarget.parentElement!.getBoundingClientRect(); seekTo(Math.max(0, (event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom))); }} onPointerMove={(event) => { if (event.buttons) { const bounds = event.currentTarget.parentElement!.getBoundingClientRect(); seekTo(Math.max(0, (event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom))); } }}>
+                {Array.from({ length: Math.ceil(duration / 5) + 3 }, (_, index) => <span className="ruler-tick" key={index} style={{ left: `${index * 5 * PIXELS_PER_SECOND * zoom}px` }}>{`00:${String(index * 5).padStart(2, '0')}`}</span>)}
+                <span className="playhead-head" style={{ left: `${currentTime * PIXELS_PER_SECOND * zoom}px` }} />
+              </div>
+              {trackRows.map((index) => <div key={index} className="track-lane" onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>
                 {project.clips.filter((clip) => clipTrackIndex(clip) === index).map((clip) => {
                   const asset = project.assets.find((item) => item.id === clip.assetId);
-                  return <button key={clip.id} data-clip-id={clip.id} className={`timeline-clip ${asset?.kind ?? 'video'} ${selectedClipIds.includes(clip.id) ? 'selected-clip' : ''}`} style={{ left: `${clip.start * PIXELS_PER_SECOND * zoom}px`, width: `${Math.max(28, clip.duration * PIXELS_PER_SECOND * zoom)}px` }} onPointerDown={(event) => beginClipDrag(event, clip, 'move')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}>
+                  return <button key={clip.id} data-clip-id={clip.id} className={`timeline-clip ${asset?.kind ?? 'video'} ${selectedClipIds.includes(clip.id) ? 'selected-clip' : ''} ${clip.assetId === hoveredMediaAssetId ? 'media-hover-highlight' : ''}`} style={{ left: `${clip.start * PIXELS_PER_SECOND * zoom}px`, width: `${Math.max(28, clip.duration * PIXELS_PER_SECOND * zoom)}px` }} onPointerDown={(event) => beginClipDrag(event, clip, 'move')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}>
                     <span className="trim-handle left" title="Trim start" onPointerDown={(event) => beginClipDrag(event, clip, 'left')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} />
                     <strong>{clip.track === 'audio' && <Music2 size={11} />} {clip.name}</strong><small>{formatTime(clip.duration)}</small>
                     <span className="trim-handle right" title="Trim end" onPointerDown={(event) => beginClipDrag(event, clip, 'right')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} />
@@ -1037,12 +1333,29 @@ export default function Editor() {
                 })}
               </div>)}
               {selectionBox && <div className="selection-box" style={{ left: selectionBox.left, top: selectionBox.top, width: selectionBox.width, height: selectionBox.height }} />}
-              <button className="playhead" style={{ left: `${currentTime * PIXELS_PER_SECOND * zoom}px` }} aria-label="Seek playhead" onPointerDown={(event) => { event.stopPropagation(); (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId); }} onPointerMove={(event) => { if (event.buttons) { const bounds = event.currentTarget.parentElement!.getBoundingClientRect(); seekTo((event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom)); } }} />
+              <div className="playhead-line" style={{ left: `${currentTime * PIXELS_PER_SECOND * zoom}px` }} aria-hidden="true" />
             </div>
           </div>
         </div>
-        <div className="timeline-footer"><span><span className="kbd">Drag empty space</span> to select · drag clips to move · edge handles to trim · click ruler to seek</span><span>{selectedClipIds.length > 1 ? `${selectedClipIds.length} clips selected · ` : ''}{project.clips.length} clips · Autosaved to this browser {saving === 'saved' && <Check size={11} />}</span></div>
+        <div className="timeline-footer"><span><span className="kbd">Drag empty space</span> to select · drag clips to move · edge handles to trim · click ruler to seek</span><span className="timeline-footer-time">{formatTime(currentTime)} <span>/</span> {formatTime(duration)}</span></div>
       </section>}
+
+      {timelineContextMenu && <div className="timeline-context-menu" role="menu" style={{ left: timelineContextMenu.x, top: timelineContextMenu.y }} onContextMenu={(event) => event.preventDefault()}>
+        {contextMenuTrackIndex !== undefined && <>
+          <button role="menuitem" disabled={trackRows.length <= 1} onClick={() => deleteTrack(contextMenuTrackIndex)}><Trash2 size={14} /> Delete Track {contextMenuTrackIndex + 1}</button>
+          <div className="timeline-context-divider" />
+        </>}
+        {contextMenuClip && <>
+          <button role="menuitem" disabled={currentTime <= contextMenuClip.start || currentTime >= contextMenuClip.start + contextMenuClip.duration} onClick={() => { splitClipAtPlayhead(contextMenuClip.id); setTimelineContextMenu(null); }}><Scissors size={14} /> Split at playhead</button>
+          {contextMenuClip.track === 'video' && contextMenuAsset?.kind === 'video' && <button role="menuitem" disabled={contextMenuClip.muted} onClick={() => { separateAudioFromVideo(contextMenuClip.id); setTimelineContextMenu(null); }}><AudioLines size={14} /> Separate audio from video</button>}
+          <button role="menuitem" onClick={() => { setProject((current) => ({ ...current, clips: current.clips.filter((clip) => clip.id !== contextMenuClip.id) })); setSelectedClipId((id) => id === contextMenuClip.id ? null : id); setSelectedClipIds((ids) => ids.filter((id) => id !== contextMenuClip.id)); setTimelineContextMenu(null); }}><Trash2 size={14} /> Delete clip</button>
+          <div className="timeline-context-divider" />
+        </>}
+        <button role="menuitem" onClick={() => { addTrack(); setTimelineContextMenu(null); }}><Plus size={14} /> Add track</button>
+        <button role="menuitem" onClick={() => { addTitle(); setTimelineContextMenu(null); }}><Type size={14} /> Add title at playhead</button>
+      </div>}
+
+      {showExportSettings && <div className="modal-backdrop" onClick={() => setShowExportSettings(false)}><section className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title" onClick={(event) => event.stopPropagation()}><header><div><h2 id="export-modal-title">Export video</h2><p>Render the complete timeline at your chosen size and format.</p></div><button className="small-icon-button" aria-label="Close export options" onClick={() => setShowExportSettings(false)}>×</button></header><label className="field-label">RESOLUTION<select value={exportResolution} onChange={(event) => setExportResolution(event.target.value as ExportResolution)}>{Object.entries(exportResolutions).map(([value, option]) => <option key={value} value={value}>{option.label} · {option.width} × {option.height}</option>)}</select></label><label className="field-label">FORMAT<select value={exportFormat} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>{exportFormatOptions.map((option) => { const supported = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(option.value); return <option key={option.value} value={option.value} disabled={!supported}>{option.label}{supported ? '' : ' · unavailable in this browser'}</option>; })}</select></label><p className="export-format-note">MP4 encoding depends on browser codec support. WebM is available in most browsers.</p>{mediaError && <div className="media-error">{mediaError}</div>}<div className="export-modal-actions"><button onClick={() => setShowExportSettings(false)}>Cancel</button><button className="share-button" disabled={exporting} onClick={() => void startVideoExport()}><Download size={14} /> Start export</button></div></section></div>}
 
       {showProjects && <div className="modal-backdrop" onClick={() => setShowProjects(false)}><section className="project-modal" onClick={(event) => event.stopPropagation()}><header><div><h2>Open a project</h2><p>Open a local project or import a portable project file.</p></div><button className="small-icon-button" onClick={() => setShowProjects(false)}>×</button></header><div className="project-modal-actions"><button className="new-project-row" onClick={() => { newProject(); setShowProjects(false); }}><FilePlus2 size={17} /> Create a new project</button><button className="new-project-row" onClick={() => projectInputRef.current?.click()}><Upload size={16} /> Import project file</button><button className="new-project-row" onClick={() => void exportProjectFile()}><Download size={16} /> Download project file</button></div>{projectList.map((item) => <div className="project-row" key={item.id}><button onClick={() => void openProject(item.id)}><Clapperboard size={16} /><span><strong>{item.name}</strong><small>Edited {new Date(item.updatedAt).toLocaleString()}</small></span></button>{item.id !== project.id && <button className="project-delete" title="Delete project" onClick={() => { void deleteProject(item.id).then(() => void showProjectPicker()); }}><Trash2 size={14} /></button>}</div>)}</section></div>}
     </main>
