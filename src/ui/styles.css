@@ -80,6 +80,18 @@ button { color: inherit; }
 .animation-preset-copy small { color: #85818e; font-size: 8px; line-height: 1.4; }
 .animation-preset > button { min-width: 42px; border: 1px solid #41394c; border-radius: 4px; padding: 5px; color: #c9afea; background: #292330; font-size: 8px; cursor: pointer; }
 .animation-preset > button:disabled { opacity: .4; cursor: default; }
+.effect-tabs { display: flex; gap: 4px; margin-top: 15px; padding: 3px; border-radius: 6px; background: #111216; }
+.effect-tabs button { flex: 1; border: 0; border-radius: 4px; padding: 7px 3px; color: #85818e; background: transparent; font-size: 8px; cursor: pointer; }
+.effect-tabs button.active { color: #d8c4f4; background: #332942; }
+.effect-preset-list { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 7px; margin-top: 11px; overflow-y: auto; }
+.effect-preset { flex: 0 0 auto; padding: 8px 7px; border: 1px solid #2b2a31; border-radius: 6px; background: #1c1d21; }
+.effect-preset.applied { border-color: #765b9d; background: #25202d; }
+.effect-preset-heading { display: grid; grid-template-columns: 30px minmax(0,1fr) auto; gap: 7px; align-items: center; }
+.effect-preset-heading > button { min-width: 42px; border: 1px solid #41394c; border-radius: 4px; padding: 5px; color: #c9afea; background: #292330; font-size: 8px; cursor: pointer; }
+.effect-preset-heading > button:disabled { opacity: .4; cursor: default; }
+.effect-intensity { display: grid; grid-template-columns: 45px minmax(0,1fr) 30px; gap: 6px; align-items: center; margin: 9px 1px 0; color: #9b97a3; font-size: 8px; }
+.effect-intensity input { min-width: 0; width: 100%; accent-color: #a37ad7; }
+.effect-intensity span { color: #c5bbd1; text-align: right; font-variant-numeric: tabular-nums; }
 .remove-animation { margin-top: 10px; border: 0; color: #cf9b9b; background: transparent; font-size: 9px; text-align: left; cursor: pointer; }
 .muted-icon { color: #777580; }
 .properties-content { margin-top: 20px; }

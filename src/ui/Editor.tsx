@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { AudioLines, Check, Clapperboard, Download, FilePlus2, Film, Music2, Pause, Play, Plus, Scissors, Sparkles, Trash2, Type, Upload, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
+import { AudioLines, Check, Clapperboard, Download, FilePlus2, Film, Music2, Pause, Play, Plus, Scissors, SlidersHorizontal, Sparkles, Trash2, Type, Upload, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
 import { deleteProject, listProjects, loadProject, saveProject } from '../editor/storage';
 import { blobToDataUrl, createProject, dataUrlToBlob, formatTime, getMediaKind, readMediaDuration } from '../editor/helpers';
-import type { EditorProject, MediaAsset, ProjectSummary, TimelineClip, TrackKind } from '../editor/types';
+import type { ClipEffect, EditorProject, MediaAsset, ProjectSummary, TimelineClip, TrackKind } from '../editor/types';
 import { applyAnimationMask, getClipAnimationTransform } from '../editor/animations/render';
+import { createEffectRenderer } from '../editor/effects/canvas';
+import { applyEffectFallback } from '../editor/effects/render';
 import EditorHeader from './EditorHeader';
 import MediaPanel from './MediaPanel';
 import AnimationLibraryPanel from './AnimationLibraryPanel';
+import EffectsLibraryPanel from './EffectsLibraryPanel';
 
 const PROJECT_KEY = 'neupcut-current-project';
 const PIXELS_PER_SECOND = 12;
@@ -22,6 +25,7 @@ export default function Editor() {
   const [, setHistoryRevision] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [previewRevision, setPreviewRevision] = useState(0);
   const [saving, setSaving] = useState<'saved' | 'saving' | 'error'>('saved');
   const [zoom, setZoom] = useState(1);
   const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
@@ -33,7 +37,7 @@ export default function Editor() {
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [projectList, setProjectList] = useState<ProjectSummary[]>([]);
   const [showProjects, setShowProjects] = useState(false);
-  const [activeSidebarPanel, setActiveSidebarPanel] = useState<'media' | 'animations'>('media');
+  const [activeSidebarPanel, setActiveSidebarPanel] = useState<'media' | 'animations' | 'effects'>('media');
   const [exporting, setExporting] = useState(false);
   const [mediaError, setMediaError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -49,6 +53,8 @@ export default function Editor() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
+  const effectCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const effectRendererRef = useRef<ReturnType<typeof createEffectRenderer> | undefined>(undefined);
   const dragRef = useRef<DragState | null>(null);
   const selectionRef = useRef<SelectionBox | null>(null);
   const urlsRef = useRef<Map<string, string>>(new Map());
@@ -548,28 +554,42 @@ export default function Editor() {
         drawWelcomeCard(context, canvas.width, canvas.height, project.name);
       } else {
         const transform = getClipAnimationTransform(active, currentTime);
-        context.save();
-        context.globalAlpha = transform.opacity / 100;
-        context.translate(canvas.width / 2 + transform.x * canvas.width / 100, canvas.height / 2 + transform.y * canvas.height / 100);
-        context.rotate(transform.rotation * Math.PI / 180);
-        context.scale(transform.scale / 100, transform.scale / 100);
-        context.translate(-canvas.width / 2, -canvas.height / 2);
-        context.filter = `blur(${transform.blur}px)`;
-        applyAnimationMask(context, canvas.width, canvas.height, transform.mask, transform.reveal);
+        const effectCanvas = effectCanvasRef.current ?? document.createElement('canvas');
+        effectCanvasRef.current = effectCanvas;
+        if (effectCanvas.width !== canvas.width) effectCanvas.width = canvas.width;
+        if (effectCanvas.height !== canvas.height) effectCanvas.height = canvas.height;
+        const effectContext = effectCanvas.getContext('2d');
+        if (!effectContext) return;
+        effectContext.clearRect(0, 0, effectCanvas.width, effectCanvas.height);
+        if (effectRendererRef.current === undefined) effectRendererRef.current = createEffectRenderer();
+        const renderer = effectRendererRef.current;
+        effectContext.save();
+        effectContext.globalAlpha = transform.opacity / 100;
+        effectContext.translate(canvas.width / 2 + transform.x * canvas.width / 100, canvas.height / 2 + transform.y * canvas.height / 100);
+        effectContext.rotate(transform.rotation * Math.PI / 180);
+        effectContext.scale(transform.scale / 100, transform.scale / 100);
+        effectContext.translate(-canvas.width / 2, -canvas.height / 2);
+        effectContext.filter = 'none';
+        applyAnimationMask(effectContext, canvas.width, canvas.height, transform.mask, transform.reveal);
         if (asset.kind === 'title') {
-          drawTitleCard(context, canvas.width, canvas.height, active.name);
+          drawTitleCard(effectContext, canvas.width, canvas.height, active.name);
         } else if (asset.kind === 'image' && imageRef.current?.complete && imageRef.current.naturalWidth) {
-          drawContained(context, imageRef.current, canvas.width, canvas.height);
+          drawContained(effectContext, imageRef.current, canvas.width, canvas.height);
         } else if (asset.kind === 'video' && videoRef.current?.readyState && videoRef.current.readyState >= 2) {
-          drawContained(context, videoRef.current, canvas.width, canvas.height);
+          drawContained(effectContext, videoRef.current, canvas.width, canvas.height);
         }
-        context.restore();
+        effectContext.restore();
+        if (renderer && (active.effects?.length || transform.blur > 0)) {
+          context.drawImage(renderer.render(effectCanvas, active.effects ?? [], transform.blur), 0, 0);
+        } else {
+          if (!renderer) applyEffectFallback(effectCanvas, active.effects ?? [], transform.blur);
+          context.drawImage(effectCanvas, 0, 0);
+        }
       }
-      animation = requestAnimationFrame(draw);
     };
     animation = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(animation);
-  }, [currentTime, project.assets, project.clips, project.name]);
+  }, [currentTime, previewRevision, project.assets, project.clips, project.name]);
 
   /** Advances the playhead with wall clock time and stops at the sequence end. */
   useEffect(() => {
@@ -652,6 +672,12 @@ export default function Editor() {
   const applyAnimation = useCallback((presetId: string, animationDuration: number) => {
     if (!selectedClip || selectedClip.track !== 'video') return;
     setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, animation: { presetId, duration: Math.min(animationDuration, clip.duration) } } : clip) }));
+  }, [selectedClip]);
+
+  /** Replaces the selected clip's effect stack after a library edit. */
+  const updateClipEffects = useCallback((effects: ClipEffect[]) => {
+    if (!selectedClip || selectedClip.track !== 'video') return;
+    setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, effects: effects.length ? effects : undefined } : clip) }));
   }, [selectedClip]);
 
   /** Removes the animation effect from the currently selected clip. */
@@ -898,7 +924,7 @@ export default function Editor() {
       />
 
       <section className="workspace">
-        <aside className="left-rail"><button className={`rail-item ${activeSidebarPanel === 'media' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('media')}><Film size={18} /><span>Media</span></button><button className={`rail-item ${activeSidebarPanel === 'animations' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('animations')}><Sparkles size={18} /><span>Animations</span></button><button className="rail-item" onClick={addTitle}><Type size={18} /><span>Text</span></button><button className="rail-item" onClick={addTitle}><Plus size={18} /><span>Title</span></button><button className="rail-item" onClick={() => fileInputRef.current?.click()}><AudioLines size={18} /><span>Audio</span></button></aside>
+        <aside className="left-rail"><button className={`rail-item ${activeSidebarPanel === 'media' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('media')}><Film size={18} /><span>Media</span></button><button className={`rail-item ${activeSidebarPanel === 'animations' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('animations')}><Sparkles size={18} /><span>Animations</span></button><button className={`rail-item ${activeSidebarPanel === 'effects' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('effects')}><SlidersHorizontal size={18} /><span>Effects</span></button><button className="rail-item" onClick={addTitle}><Type size={18} /><span>Text</span></button><button className="rail-item" onClick={addTitle}><Plus size={18} /><span>Title</span></button><button className="rail-item" onClick={() => fileInputRef.current?.click()}><AudioLines size={18} /><span>Audio</span></button></aside>
 
         {activeSidebarPanel === 'media' ? <MediaPanel
           assets={project.assets}
@@ -908,11 +934,11 @@ export default function Editor() {
           onImportFiles={(files) => void importFiles(files)}
           onImportProject={(file) => void importProjectFile(file)}
           onAddAsset={addAssetToTimeline}
-        /> : <AnimationLibraryPanel selectedClip={selectedClip} onApply={applyAnimation} onRemove={removeAnimation} />}
+        /> : activeSidebarPanel === 'animations' ? <AnimationLibraryPanel selectedClip={selectedClip} onApply={applyAnimation} onRemove={removeAnimation} /> : <EffectsLibraryPanel selectedClip={selectedClip} onChangeEffects={updateClipEffects} />}
 
         <section className="preview-area">
           <div className="preview-header"><div className="preview-label"><span className="live-dot" /> CANVAS PREVIEW</div><div className="preview-resolution"><button className="viewer-zoom-step" aria-label="Zoom viewer out" title="Zoom out" onClick={() => adjustViewerZoom(-0.1)}><ZoomOut size={13} /></button><button className="viewer-zoom-reset" title="Reset viewer zoom" onClick={() => { setViewerZoom(1); setViewerPan({ x: 0, y: 0 }); }}>{Math.round(viewerZoom * 100)}%</button><button className="viewer-zoom-step" aria-label="Zoom viewer in" title="Zoom in" onClick={() => adjustViewerZoom(0.1)}><ZoomIn size={13} /></button> 1280 × 720 <span>·</span> {formatTime(currentTime)}</div></div>
-          <div className={`preview-stage viewer-zoom-surface ${viewerPanning ? 'panning' : ''}`} onPointerDownCapture={trackViewerPointer} onPointerMoveCapture={updateViewerPinch} onPointerUpCapture={endViewerPinch} onPointerCancelCapture={endViewerPinch}><div className="player-frame" style={{ transform: `translate(${viewerPan.x}px, ${viewerPan.y}px) scale(${viewerZoom})`, cursor: viewerPanning ? 'grabbing' : viewerZoom > 1 ? 'grab' : 'default' }}><canvas ref={canvasRef} width={1280} height={720} /><video ref={videoRef} playsInline hidden /><audio ref={audioRef} hidden /><img ref={imageRef} src={activeVideoAsset?.kind === 'image' ? assetUrls.get(activeVideoAsset.id) : undefined} hidden onLoad={() => setCurrentTime((time) => time)} /></div>{!playing && duration > 0 && <button className="viewer-play-button" aria-label="Play video preview" title="Play video preview (Space)" onPointerDown={(event) => event.stopPropagation()} onClick={togglePlayback}><Play size={22} fill="currentColor" /></button>}</div>
+          <div className={`preview-stage viewer-zoom-surface ${viewerPanning ? 'panning' : ''}`} onPointerDownCapture={trackViewerPointer} onPointerMoveCapture={updateViewerPinch} onPointerUpCapture={endViewerPinch} onPointerCancelCapture={endViewerPinch}><div className="player-frame" style={{ transform: `translate(${viewerPan.x}px, ${viewerPan.y}px) scale(${viewerZoom})`, cursor: viewerPanning ? 'grabbing' : viewerZoom > 1 ? 'grab' : 'default' }}><canvas ref={canvasRef} width={1280} height={720} /><video ref={videoRef} playsInline hidden onLoadedData={() => setPreviewRevision((revision) => revision + 1)} onSeeked={() => setPreviewRevision((revision) => revision + 1)} /><audio ref={audioRef} hidden /><img ref={imageRef} src={activeVideoAsset?.kind === 'image' ? assetUrls.get(activeVideoAsset.id) : undefined} hidden onLoad={() => setPreviewRevision((revision) => revision + 1)} /></div>{!playing && duration > 0 && <button className="viewer-play-button" aria-label="Play video preview" title="Play video preview (Space)" onPointerDown={(event) => event.stopPropagation()} onClick={togglePlayback}><Play size={22} fill="currentColor" /></button>}</div>
           <div className="transport"><div className="time-readout"><span>{formatTime(currentTime)}</span><span className="time-divider">/</span><span className="time-total">{formatTime(duration)}</span></div><button className="play-button" onClick={togglePlayback} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button><div className="transport-right"><button className="icon-button" aria-label="Audio volume"><Volume2 size={17} /></button><button className="quality-button">30 FPS <span>·</span> 720p</button></div></div>
         </section>
 

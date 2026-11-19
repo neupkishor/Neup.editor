@@ -6,6 +6,11 @@ export type ClipAnimationEffect = {
   duration: number;
 };
 
+export type ClipEffect = {
+  presetId: string;
+  amount: number;
+};
+
 export type MediaAsset = {
   id: string;
   name: string;
@@ -25,6 +30,7 @@ export type TimelineClip = {
   duration: number;
   sourceStart: number;
   animation?: ClipAnimationEffect;
+  effects?: ClipEffect[];
 };
 
 export type EditorProject = {
