@@ -799,6 +799,24 @@ export default function Editor() {
     setSelectedClipIds([clip.id]);
   }, [currentTime]);
 
+  /** Places a dragged media asset at the drop position and on the lane under the pointer. */
+  const dropAssetOnTimeline = (event: React.DragEvent<HTMLDivElement>, trackIndex: number) => {
+    event.preventDefault();
+    const assetId = event.dataTransfer.getData('application/x-neupcut-asset') || event.dataTransfer.getData('text/plain');
+    const asset = project.assets.find((item) => item.id === assetId);
+    if (!asset) return;
+    const track: TrackKind = asset.kind === 'audio' ? 'audio' : 'video';
+    const laneOffset = track === 'audio' ? Math.max(0, ...project.clips.filter((clip) => clip.track === 'audio').map(clipTrackIndex)) : 0;
+    const targetTrackIndex = track === 'audio' ? Math.max(laneOffset, trackIndex) : trackIndex;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const requestedStart = Math.max(0, (event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom));
+    const duration = Math.max(0.5, asset.duration);
+    const clip: TimelineClip = { id: crypto.randomUUID(), assetId: asset.id, name: asset.name, track, trackIndex: targetTrackIndex, start: requestedStart, duration, sourceStart: 0 };
+    setProject((current) => ({ ...current, trackCount: Math.max(current.trackCount ?? 1, targetTrackIndex + 1), clips: [...current.clips, { ...clip, start: findOpenClipStart(current.clips, targetTrackIndex, requestedStart, duration) }] }));
+    setSelectedClipId(clip.id);
+    setSelectedClipIds([clip.id]);
+  };
+
   /** Removes a media asset and every timeline clip that references it. */
   const deleteMediaAsset = useCallback((assetId: string) => {
     const removedClipIds = project.clips.filter((clip) => clip.assetId === assetId).map((clip) => clip.id);
@@ -1322,7 +1340,7 @@ export default function Editor() {
                 {Array.from({ length: Math.ceil(duration / 5) + 3 }, (_, index) => <span className="ruler-tick" key={index} style={{ left: `${index * 5 * PIXELS_PER_SECOND * zoom}px` }}>{`00:${String(index * 5).padStart(2, '0')}`}</span>)}
                 <span className="playhead-head" style={{ left: `${currentTime * PIXELS_PER_SECOND * zoom}px` }} />
               </div>
-              {trackRows.map((index) => <div key={index} className="track-lane" onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>
+              {trackRows.map((index) => <div key={index} className="track-lane" onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-neupcut-asset') || event.dataTransfer.types.includes('text/plain')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }} onDrop={(event) => dropAssetOnTimeline(event, index)} onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>
                 {project.clips.filter((clip) => clipTrackIndex(clip) === index).map((clip) => {
                   const asset = project.assets.find((item) => item.id === clip.assetId);
                   return <button key={clip.id} data-clip-id={clip.id} className={`timeline-clip ${asset?.kind ?? 'video'} ${selectedClipIds.includes(clip.id) ? 'selected-clip' : ''} ${clip.assetId === hoveredMediaAssetId ? 'media-hover-highlight' : ''}`} style={{ left: `${clip.start * PIXELS_PER_SECOND * zoom}px`, width: `${Math.max(28, clip.duration * PIXELS_PER_SECOND * zoom)}px` }} onPointerDown={(event) => beginClipDrag(event, clip, 'move')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}>
