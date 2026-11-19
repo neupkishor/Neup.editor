@@ -148,4 +148,15 @@ button { color: inherit; }
 .project-row > button:first-child { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px; border: 0; background: transparent; color: #b7a0d8; text-align: left; cursor: pointer; }
 .project-row span { min-width: 0; display: flex; flex-direction: column; gap: 4px; }.project-row strong { overflow: hidden; color: #dedbe3; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.project-row small { color: #85818d; font-size: 8px; }
 .project-delete { margin: 0 8px; border: 0; background: transparent; color: #887d83; cursor: pointer; }.project-delete:hover { color: #f09595; }
+.timeline-scroll { touch-action: pan-x; overscroll-behavior: contain; }
+.zoom-level { width: 30px; color: #9a96a2; font: 8px ui-monospace,monospace; text-align: center; }
+.selection-box { position: absolute; z-index: 6; border: 1px solid #b794f6; background: #9d78d433; box-shadow: 0 0 0 1px #20192b66 inset; pointer-events: none; }
+.timeline-scroll:has(.selection-box) { cursor: crosshair; }
+.preview-stage { position: relative; overflow: hidden; touch-action: none; }
+.viewer-zoom-reset { margin-right: 7px; padding: 3px 5px; border: 1px solid #37343e; border-radius: 4px; background: #1c1b21; color: #bcb4c9; font: 8px ui-monospace,monospace; cursor: pointer; }
+.viewer-zoom-reset:hover { border-color: #705a92; color: #e2cffd; }
+.viewer-zoom-step { width: 22px; height: 22px; display: inline-grid; place-items: center; margin-right: 3px; border: 1px solid #34323a; border-radius: 4px; background: #1a1a20; color: #a7a2af; vertical-align: middle; cursor: pointer; }
+.viewer-zoom-step:hover { border-color: #705a92; color: #e2cffd; }
+.preview-stage.panning { cursor: grabbing; }
+.preview-stage .player-frame { will-change: transform; }
 @media (max-width: 1100px) { .workspace { grid-template-columns: 56px 210px minmax(340px,1fr); }.properties-panel { display: block; position: absolute; right: 0; top: 58px; bottom: 300px; width: 235px; z-index: 5; box-shadow: -12px 0 30px #0005; } }

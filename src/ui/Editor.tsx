@@ -8,6 +8,7 @@ const PIXELS_PER_SECOND = 12;
 const FRAME_RATE = 30;
 
 type DragState = { clipId: string; mode: 'move' | 'left' | 'right'; pointerX: number; start: number; duration: number; sourceStart: number; maxDuration: number; track: TrackKind };
+type SelectionBox = { pointerId: number; startX: number; startY: number; currentX: number; currentY: number; left: number; top: number; width: number; height: number };
 
 /** Creates a new empty video editing project. */
 function createProject(): EditorProject {
@@ -51,18 +52,31 @@ export default function Editor() {
   const [playing, setPlaying] = useState(false);
   const [saving, setSaving] = useState<'saved' | 'saving' | 'error'>('saved');
   const [zoom, setZoom] = useState(1);
+  const [viewerZoom, setViewerZoom] = useState(1);
+  const [viewerPan, setViewerPan] = useState({ x: 0, y: 0 });
+  const [viewerPanning, setViewerPanning] = useState(false);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
+  const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [projectList, setProjectList] = useState<ProjectSummary[]>([]);
   const [showProjects, setShowProjects] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [mediaError, setMediaError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
+  const timelineScrollRef = useRef<HTMLDivElement>(null);
+  const touchPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchRef = useRef<{ distance: number; zoom: number; centerX: number } | null>(null);
+  const gestureZoomRef = useRef<{ area: 'timeline' | 'viewer'; zoom: number; scale: number } | null>(null);
+  const viewerPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const viewerPinchRef = useRef<{ distance: number; zoom: number; midpoint: { x: number; y: number }; pan: { x: number; y: number } } | null>(null);
+  const viewerDragRef = useRef<{ pointerId: number; x: number; y: number; pan: { x: number; y: number } } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const dragRef = useRef<DragState | null>(null);
+  const selectionRef = useRef<SelectionBox | null>(null);
   const urlsRef = useRef<Map<string, string>>(new Map());
   const timeRef = useRef(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -82,6 +96,307 @@ export default function Editor() {
   const activeAudioAsset = project.assets.find((asset) => asset.id === activeAudio?.assetId);
   const selectedClip = project.clips.find((clip) => clip.id === selectedClipId);
   const timelineWidth = Math.max(800, (duration + 12) * PIXELS_PER_SECOND * zoom);
+
+  /** Zooms around the gesture midpoint and keeps that timeline point in place. */
+  const zoomAroundPoint = (nextZoom: number, clientX: number) => {
+    const scrollElement = timelineScrollRef.current;
+    const boundedZoom = Math.max(0.5, Math.min(10, nextZoom));
+    if (scrollElement && boundedZoom !== zoom) {
+      const bounds = scrollElement.getBoundingClientRect();
+      const pointInViewport = clientX - bounds.left;
+      const timelinePoint = scrollElement.scrollLeft + pointInViewport;
+      setZoom(boundedZoom);
+      requestAnimationFrame(() => {
+        if (timelineScrollRef.current) timelineScrollRef.current.scrollLeft = timelinePoint * (boundedZoom / zoom) - pointInViewport;
+      });
+      return;
+    }
+    setZoom(boundedZoom);
+  };
+
+  /** Keeps viewer panning within the scaled preview's visible bounds. */
+  const clampViewerPan = (pan: { x: number; y: number }, scale: number) => {
+    const stage = document.querySelector<HTMLElement>('.viewer-zoom-surface');
+    const frame = stage?.querySelector<HTMLElement>('.player-frame');
+    if (!stage || !frame) return pan;
+    const maxX = Math.max(0, (frame.offsetWidth * scale - stage.clientWidth) / 2);
+    const maxY = Math.max(0, (frame.offsetHeight * scale - stage.clientHeight) / 2);
+    return { x: Math.max(-maxX, Math.min(maxX, pan.x)), y: Math.max(-maxY, Math.min(maxY, pan.y)) };
+  };
+
+  /** Zooms the preview around the user's pointer or pinch midpoint. */
+  const zoomViewerAroundPoint = (nextZoom: number, clientX: number, clientY: number) => {
+    const surface = document.querySelector<HTMLElement>('.viewer-zoom-surface');
+    const boundedZoom = Math.max(0.25, Math.min(5, nextZoom));
+    if (surface) {
+      const bounds = surface.getBoundingClientRect();
+      const offsetX = clientX - bounds.left - bounds.width / 2;
+      const offsetY = clientY - bounds.top - bounds.height / 2;
+      const ratio = boundedZoom / viewerZoom;
+      setViewerPan(clampViewerPan({
+        x: offsetX - (offsetX - viewerPan.x) * ratio,
+        y: offsetY - (offsetY - viewerPan.y) * ratio,
+      }, boundedZoom));
+    }
+    setViewerZoom(boundedZoom);
+  };
+
+  /** Pans the preview with regular mouse wheel and Shift plus wheel input. */
+  useEffect(() => {
+    const surface = document.querySelector<HTMLElement>('.viewer-zoom-surface');
+    if (!surface) return;
+    const handleViewerWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) return;
+      if (viewerZoom <= 1 && !event.shiftKey) return;
+      event.preventDefault();
+      const horizontal = event.shiftKey ? (event.deltaY || event.deltaX) : event.deltaX;
+      const vertical = event.shiftKey ? 0 : event.deltaY;
+      setViewerPan((current) => clampViewerPan({ x: current.x - horizontal, y: current.y - vertical }, viewerZoom));
+    };
+    surface.addEventListener('wheel', handleViewerWheel, { passive: false });
+    return () => surface.removeEventListener('wheel', handleViewerWheel);
+  }, [viewerPan, viewerZoom]);
+
+  /** Steps preview magnification around the center of the viewer. */
+  const adjustViewerZoom = (step: number) => {
+    const bounds = document.querySelector<HTMLElement>('.viewer-zoom-surface')?.getBoundingClientRect();
+    zoomViewerAroundPoint(viewerZoom + step, bounds ? bounds.left + bounds.width / 2 : window.innerWidth / 2, bounds ? bounds.top + bounds.height / 2 : window.innerHeight / 2);
+  };
+
+  /** Enables trackpad pinch gestures over the timeline without zooming the page. */
+  useEffect(() => {
+    const scrollElement = timelineScrollRef.current;
+    if (!scrollElement) return;
+    const handleWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      zoomAroundPoint(zoom * Math.exp(-event.deltaY * 0.008), event.clientX);
+    };
+    scrollElement.addEventListener('wheel', handleWheel, { passive: false });
+    return () => scrollElement.removeEventListener('wheel', handleWheel);
+  }, [zoom]);
+
+  /** Blocks browser page zoom gestures while leaving timeline pinch handling active. */
+  useEffect(() => {
+    const preventBrowserZoom = (event: Event) => event.preventDefault();
+    const preventWheelZoom = (event: WheelEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('.timeline-scroll')) return;
+      if (target instanceof Element && target.closest('.viewer-zoom-surface')) {
+        event.preventDefault();
+        zoomViewerAroundPoint(viewerZoom * Math.exp(-event.deltaY * 0.008), event.clientX, event.clientY);
+        return;
+      }
+      event.preventDefault();
+    };
+    const handleGestureStart = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('.viewer-zoom-surface')) {
+        const gesture = event as Event & { scale?: number };
+        gestureZoomRef.current = { area: 'viewer', zoom: viewerZoom, scale: gesture.scale ?? 1 };
+        event.preventDefault();
+        return;
+      }
+      if (!(target instanceof Element) || !target.closest('.timeline-scroll')) {
+        preventBrowserZoom(event);
+        return;
+      }
+      const gesture = event as Event & { scale?: number };
+      gestureZoomRef.current = { area: 'timeline', zoom, scale: gesture.scale ?? 1 };
+      event.preventDefault();
+    };
+    const handleGestureChange = (event: Event) => {
+      const target = event.target;
+      const initial = gestureZoomRef.current;
+      if (target instanceof Element && target.closest('.viewer-zoom-surface') && initial?.area === 'viewer') {
+        const gesture = event as Event & { scale?: number; clientX?: number; clientY?: number };
+        event.preventDefault();
+        zoomViewerAroundPoint(initial.zoom * ((gesture.scale ?? 1) / initial.scale), gesture.clientX ?? window.innerWidth / 2, gesture.clientY ?? window.innerHeight / 2);
+        return;
+      }
+      if (!(target instanceof Element) || !target.closest('.timeline-scroll')) {
+        preventBrowserZoom(event);
+        return;
+      }
+      const gesture = event as Event & { scale?: number; clientX?: number };
+      event.preventDefault();
+      if (initial?.area === 'timeline') zoomAroundPoint(initial.zoom * ((gesture.scale ?? 1) / initial.scale), gesture.clientX ?? window.innerWidth / 2);
+    };
+    const handleGestureEnd = (event: Event) => {
+      gestureZoomRef.current = null;
+      if (!(event.target instanceof Element) || !event.target.closest('.timeline-scroll')) preventBrowserZoom(event);
+    };
+    window.addEventListener('wheel', preventWheelZoom, { capture: true, passive: false });
+    window.addEventListener('gesturestart', handleGestureStart, { capture: true, passive: false });
+    window.addEventListener('gesturechange', handleGestureChange, { capture: true, passive: false });
+    window.addEventListener('gestureend', handleGestureEnd, { capture: true, passive: false });
+    return () => {
+      window.removeEventListener('wheel', preventWheelZoom, true);
+      window.removeEventListener('gesturestart', handleGestureStart, true);
+      window.removeEventListener('gesturechange', handleGestureChange, true);
+      window.removeEventListener('gestureend', handleGestureEnd, true);
+    };
+  }, [viewerPan, viewerZoom, zoom]);
+
+  /** Tracks touch pointers and scales the timeline from a two finger pinch. */
+  const trackTouchPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== 'touch') return;
+    const pointers = touchPointersRef.current;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size >= 2) {
+      const pair = Array.from(pointers.values()).slice(0, 2);
+      const distance = Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y);
+      pinchRef.current = { distance: Math.max(1, distance), zoom, centerX: (pair[0].x + pair[1].x) / 2 };
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  };
+
+  /** Applies pinch distance changes while preserving the gesture midpoint. */
+  const updateTouchPinch = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== 'touch' || !touchPointersRef.current.has(event.pointerId)) return;
+    const pointers = touchPointersRef.current;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size < 2 || !pinchRef.current) return;
+    const pair = Array.from(pointers.values()).slice(0, 2);
+    const distance = Math.max(1, Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y));
+    const initial = pinchRef.current;
+    zoomAroundPoint(initial.zoom * (distance / initial.distance), (pair[0].x + pair[1].x) / 2);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  /** Clears a released touch pointer and resets pinch tracking. */
+  const endTouchPinch = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== 'touch') return;
+    if (pinchRef.current) dragRef.current = null;
+    touchPointersRef.current.delete(event.pointerId);
+    pinchRef.current = null;
+  };
+
+  /** Starts a paint style selection box when dragging over empty track space. */
+  const beginTimelineSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'touch') {
+      trackTouchPointer(event);
+      return;
+    }
+    const target = event.target as HTMLElement;
+    if (!target.closest('.track-lane') || target.closest('.timeline-clip')) return;
+    const timeline = event.currentTarget.querySelector<HTMLElement>('.timeline-inner');
+    const bounds = timeline?.getBoundingClientRect();
+    if (!bounds) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    const box = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, currentX: event.clientX, currentY: event.clientY, left: x, top: y, width: 0, height: 0 };
+    selectionRef.current = box;
+    setSelectionBox(box);
+  };
+
+  /** Updates the visible selection marquee while the pointer is held. */
+  const updateTimelineSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    updateTouchPinch(event);
+    const current = selectionRef.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    const timeline = event.currentTarget.querySelector<HTMLElement>('.timeline-inner');
+    const bounds = timeline?.getBoundingClientRect();
+    if (!bounds) return;
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    const next = { ...current, currentX: event.clientX, currentY: event.clientY, left: Math.min(current.startX - bounds.left, x), top: Math.min(current.startY - bounds.top, y), width: Math.abs(x - (current.startX - bounds.left)), height: Math.abs(y - (current.startY - bounds.top)) };
+    selectionRef.current = next;
+    setSelectionBox(next);
+  };
+
+  /** Selects every clip intersecting the marquee and finishes the drag. */
+  const finishTimelineSelection = (event: ReactPointerEvent<HTMLDivElement>, commit: boolean) => {
+    endTouchPinch(event);
+    const current = selectionRef.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    if (commit && Math.hypot(current.currentX - current.startX, current.currentY - current.startY) > 3) {
+      const bounds = { left: Math.min(current.startX, current.currentX), right: Math.max(current.startX, current.currentX), top: Math.min(current.startY, current.currentY), bottom: Math.max(current.startY, current.currentY) };
+      const clips = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('.timeline-clip'));
+      const selected = clips.filter((clip) => {
+        const rect = clip.getBoundingClientRect();
+        return rect.right >= bounds.left && rect.left <= bounds.right && rect.bottom >= bounds.top && rect.top <= bounds.bottom;
+      }).map((clip) => clip.dataset.clipId).filter((id): id is string => Boolean(id));
+      setSelectedClipIds(selected);
+      setSelectedClipId(selected[selected.length - 1] ?? null);
+    } else if (commit) {
+      setSelectedClipIds([]);
+      setSelectedClipId(null);
+    }
+    selectionRef.current = null;
+    setSelectionBox(null);
+  };
+
+  /** Begins tracking two finger gestures over the video preview. */
+  const trackViewerPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'mouse' && event.button === 0 && viewerZoom > 1) {
+      viewerDragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, pan: viewerPan };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setViewerPanning(true);
+      event.preventDefault();
+      return;
+    }
+    if (event.pointerType !== 'touch') return;
+    const pointers = viewerPointersRef.current;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size >= 2) {
+      const pair = Array.from(pointers.values()).slice(0, 2);
+      viewerPinchRef.current = {
+        distance: Math.max(1, Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y)),
+        zoom: viewerZoom,
+        midpoint: { x: (pair[0].x + pair[1].x) / 2, y: (pair[0].y + pair[1].y) / 2 },
+        pan: viewerPan,
+      };
+      event.preventDefault();
+    }
+  };
+
+  /** Pinches the preview canvas while keeping the midpoint as the zoom anchor. */
+  const updateViewerPinch = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = viewerDragRef.current;
+    if (event.pointerType === 'mouse' && drag?.pointerId === event.pointerId) {
+      setViewerPan(clampViewerPan({ x: drag.pan.x + event.clientX - drag.x, y: drag.pan.y + event.clientY - drag.y }, viewerZoom));
+      event.preventDefault();
+      return;
+    }
+    if (event.pointerType !== 'touch' || !viewerPointersRef.current.has(event.pointerId)) return;
+    const pointers = viewerPointersRef.current;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size < 2 || !viewerPinchRef.current) return;
+    const pair = Array.from(pointers.values()).slice(0, 2);
+    const distance = Math.max(1, Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y));
+    const midpoint = { x: (pair[0].x + pair[1].x) / 2, y: (pair[0].y + pair[1].y) / 2 };
+    const pinch = viewerPinchRef.current;
+    const nextZoom = Math.max(0.25, Math.min(5, pinch.zoom * (distance / pinch.distance)));
+    const stage = document.querySelector<HTMLElement>('.viewer-zoom-surface');
+    const bounds = stage?.getBoundingClientRect();
+    const centerX = bounds ? bounds.left + bounds.width / 2 : midpoint.x;
+    const centerY = bounds ? bounds.top + bounds.height / 2 : midpoint.y;
+    const ratio = nextZoom / pinch.zoom;
+    setViewerPan(clampViewerPan({
+      x: midpoint.x - centerX - (pinch.midpoint.x - centerX - pinch.pan.x) * ratio,
+      y: midpoint.y - centerY - (pinch.midpoint.y - centerY - pinch.pan.y) * ratio,
+    }, nextZoom));
+    setViewerZoom(nextZoom);
+    event.preventDefault();
+  };
+
+  /** Ends preview pinch tracking when a touch pointer is released. */
+  const endViewerPinch = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (viewerDragRef.current?.pointerId === event.pointerId) {
+      viewerDragRef.current = null;
+      setViewerPanning(false);
+    }
+    if (event.pointerType !== 'touch') return;
+    viewerPointersRef.current.delete(event.pointerId);
+    viewerPinchRef.current = null;
+  };
 
   /** Reclaims object URLs when the active project's assets change or unmount. */
   useEffect(() => {
@@ -225,6 +540,7 @@ export default function Editor() {
     if (imported.length) {
       setProject((current) => ({ ...current, assets: [...current.assets, ...imported], clips: [...current.clips, ...added] }));
       setSelectedClipId(added[0].id);
+      setSelectedClipIds([added[0].id]);
     }
     if (imported.length < files.length) setMediaError('Some files were skipped. Import audio, video, or image files supported by your browser.');
     else setMediaError('');
@@ -236,6 +552,7 @@ export default function Editor() {
     const clip: TimelineClip = { id: crypto.randomUUID(), assetId: asset.id, name: asset.name, track: 'video', start: currentTime, duration: 5, sourceStart: 0 };
     setProject((current) => ({ ...current, assets: [...current.assets, asset], clips: [...current.clips, clip] }));
     setSelectedClipId(clip.id);
+    setSelectedClipIds([clip.id]);
   }, [currentTime]);
 
   /** Adds another instance of an existing media asset at the playhead. */
@@ -244,6 +561,7 @@ export default function Editor() {
     const clip: TimelineClip = { id: crypto.randomUUID(), assetId: asset.id, name: asset.name, track, start: currentTime, duration: Math.max(0.5, asset.duration), sourceStart: 0 };
     setProject((current) => ({ ...current, clips: [...current.clips, clip] }));
     setSelectedClipId(clip.id);
+    setSelectedClipIds([clip.id]);
   }, [currentTime]);
 
   /** Starts or pauses native playback at the current timeline position. */
@@ -260,6 +578,7 @@ export default function Editor() {
     timeRef.current = 0;
     setCurrentTime(0);
     setSelectedClipId(null);
+    setSelectedClipIds([]);
     setProject(stored);
     localStorage.setItem(PROJECT_KEY, id);
     setShowProjects(false);
@@ -273,6 +592,7 @@ export default function Editor() {
     setCurrentTime(0);
     setProject(fresh);
     setSelectedClipId(null);
+    setSelectedClipIds([]);
     localStorage.setItem(PROJECT_KEY, fresh.id);
   }, []);
 
@@ -304,6 +624,7 @@ export default function Editor() {
       const restored: EditorProject = { ...archive.project, assets: archive.project.assets.map(({ blobData, ...asset }) => ({ ...asset, blob: blobData ? dataUrlToBlob(blobData) : undefined })) };
       setProject(restored);
       setSelectedClipId(null);
+      setSelectedClipIds([]);
       timeRef.current = 0;
       setCurrentTime(0);
       setPlaying(false);
@@ -318,23 +639,30 @@ export default function Editor() {
 
   /** Removes the selected clip from the project timeline. */
   const removeSelectedClip = useCallback(() => {
-    if (!selectedClipId) return;
-    setProject((current) => ({ ...current, clips: current.clips.filter((clip) => clip.id !== selectedClipId) }));
+    const idsToRemove = selectedClipIds.length ? selectedClipIds : selectedClipId ? [selectedClipId] : [];
+    if (!idsToRemove.length) return;
+    setProject((current) => ({ ...current, clips: current.clips.filter((clip) => !idsToRemove.includes(clip.id)) }));
     setSelectedClipId(null);
-  }, [selectedClipId]);
+    setSelectedClipIds([]);
+  }, [selectedClipId, selectedClipIds]);
 
   /** Starts moving or trimming a clip based on the pointer target. */
   const beginClipDrag = (event: ReactPointerEvent<HTMLElement>, clip: TimelineClip, mode: DragState['mode']) => {
     event.preventDefault();
     event.stopPropagation();
     setSelectedClipId(clip.id);
+    if (event.shiftKey || event.metaKey || event.ctrlKey) {
+      setSelectedClipIds((current) => current.includes(clip.id) ? current.filter((id) => id !== clip.id) : [...current, clip.id]);
+    } else {
+      setSelectedClipIds([clip.id]);
+    }
     const asset = project.assets.find((item) => item.id === clip.assetId);
     dragRef.current = { clipId: clip.id, mode, pointerX: event.clientX, start: clip.start, duration: clip.duration, sourceStart: clip.sourceStart, maxDuration: asset?.duration ?? Number.POSITIVE_INFINITY, track: clip.track };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   /** Moves the active clip or adjusts its source in and duration while dragging. */
-  const updateClipDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  const updateClipDrag = (event: ReactPointerEvent<HTMLElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
     const delta = Math.round(((event.clientX - drag.pointerX) / (PIXELS_PER_SECOND * zoom)) * FRAME_RATE) / FRAME_RATE;
@@ -439,8 +767,8 @@ export default function Editor() {
         </aside>
 
         <section className="preview-area">
-          <div className="preview-header"><div className="preview-label"><span className="live-dot" /> CANVAS PREVIEW</div><div className="preview-resolution">1280 × 720 <span>·</span> {formatTime(currentTime)}</div></div>
-          <div className="preview-stage"><div className="player-frame"><canvas ref={canvasRef} width={1280} height={720} /><video ref={videoRef} playsInline hidden /><audio ref={audioRef} hidden /><img ref={imageRef} src={activeVideoAsset?.kind === 'image' ? assetUrls.get(activeVideoAsset.id) : undefined} hidden onLoad={() => setCurrentTime((time) => time)} /></div></div>
+          <div className="preview-header"><div className="preview-label"><span className="live-dot" /> CANVAS PREVIEW</div><div className="preview-resolution"><button className="viewer-zoom-step" aria-label="Zoom viewer out" title="Zoom out" onClick={() => adjustViewerZoom(-0.1)}><ZoomOut size={13} /></button><button className="viewer-zoom-reset" title="Reset viewer zoom" onClick={() => { setViewerZoom(1); setViewerPan({ x: 0, y: 0 }); }}>{Math.round(viewerZoom * 100)}%</button><button className="viewer-zoom-step" aria-label="Zoom viewer in" title="Zoom in" onClick={() => adjustViewerZoom(0.1)}><ZoomIn size={13} /></button> 1280 × 720 <span>·</span> {formatTime(currentTime)}</div></div>
+          <div className={`preview-stage viewer-zoom-surface ${viewerPanning ? 'panning' : ''}`} onPointerDownCapture={trackViewerPointer} onPointerMoveCapture={updateViewerPinch} onPointerUpCapture={endViewerPinch} onPointerCancelCapture={endViewerPinch}><div className="player-frame" style={{ transform: `translate(${viewerPan.x}px, ${viewerPan.y}px) scale(${viewerZoom})`, cursor: viewerPanning ? 'grabbing' : viewerZoom > 1 ? 'grab' : 'default' }}><canvas ref={canvasRef} width={1280} height={720} /><video ref={videoRef} playsInline hidden /><audio ref={audioRef} hidden /><img ref={imageRef} src={activeVideoAsset?.kind === 'image' ? assetUrls.get(activeVideoAsset.id) : undefined} hidden onLoad={() => setCurrentTime((time) => time)} /></div></div>
           <div className="transport"><div className="time-readout"><span>{formatTime(currentTime)}</span><span className="time-divider">/</span><span className="time-total">{formatTime(duration)}</span></div><button className="play-button" onClick={togglePlayback} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button><div className="transport-right"><button className="icon-button" aria-label="Audio volume"><Volume2 size={17} /></button><button className="quality-button">30 FPS <span>·</span> 720p</button></div></div>
         </section>
 
@@ -448,9 +776,28 @@ export default function Editor() {
       </section>
 
       <section className="timeline-section">
-        <div className="timeline-toolbar"><div className="timeline-tools"><button className="tool-button selected" title="Select and move clips"><span className="cursor-icon">↖</span></button><button className="tool-button" title="Split clip at playhead" onClick={() => { const clip = project.clips.find((item) => item.track === 'video' && currentTime > item.start && currentTime < item.start + item.duration); if (!clip) return; const firstDuration = currentTime - clip.start; const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: currentTime, sourceStart: clip.sourceStart + firstDuration, duration: clip.duration - firstDuration }; setProject((current) => ({ ...current, clips: [...current.clips.map((item) => item.id === clip.id ? { ...item, duration: firstDuration } : item), second] })); setSelectedClipId(second.id); }}><Scissors size={15} /></button><span className="toolbar-separator" /><button className="tool-button" onClick={addTitle} title="Add title"><Type size={15} /></button><button className="tool-button" onClick={removeSelectedClip} title="Delete selected clip"><Trash2 size={15} /></button></div><div className="timeline-center">Timeline <span className="timeline-duration">{formatTime(duration)}</span></div><div className="zoom-control"><button className="tool-button" aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))}><ZoomOut size={15} /></button><input type="range" min="0.5" max="2" step="0.05" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /><button className="tool-button" aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(2, value + 0.15))}><ZoomIn size={15} /></button></div></div>
-        <div className="timeline-body"><div className="track-labels"><div className="ruler-spacer" /><div className="track-label"><Video size={15} /><span>Video 1</span><span className="track-menu">···</span></div><div className="track-label"><Music2 size={15} /><span>Audio 1</span><span className="track-menu">···</span></div></div><div className="timeline-scroll"><div className="timeline-inner" style={{ width: timelineWidth }} onPointerDown={(event) => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('ruler')) { const bounds = event.currentTarget.getBoundingClientRect(); seekTo(Math.max(0, (event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom))); } }}><div className="ruler">{Array.from({ length: Math.ceil(duration / 5) + 3 }, (_, index) => <button className="ruler-tick" key={index} style={{ left: `${index * 5 * PIXELS_PER_SECOND * zoom}px` }} onClick={() => seekTo(index * 5)}>{`00:${String(index * 5).padStart(2, '0')}`}</button>)}</div>{(['video', 'audio'] as const).map((track) => <div key={track} className={`track-lane ${track}-lane`} onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>{project.clips.filter((clip) => clip.track === track).map((clip) => { const asset = project.assets.find((item) => item.id === clip.assetId); return <button key={clip.id} className={`timeline-clip ${asset?.kind ?? 'video'} ${selectedClipId === clip.id ? 'selected-clip' : ''}`} style={{ left: `${clip.start * PIXELS_PER_SECOND * zoom}px`, width: `${Math.max(28, clip.duration * PIXELS_PER_SECOND * zoom)}px` }} onPointerDown={(event) => beginClipDrag(event, clip, 'move')} onPointerMove={updateClipDrag} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}><span className="trim-handle left" title="Trim start" onPointerDown={(event) => beginClipDrag(event, clip, 'left')} onPointerMove={updateClipDrag} onPointerUp={endClipDrag} /><strong>{track === 'audio' && <Music2 size={11} />} {clip.name}</strong><small>{formatTime(clip.duration)}</small><span className="trim-handle right" title="Trim end" onPointerDown={(event) => beginClipDrag(event, clip, 'right')} onPointerMove={updateClipDrag} onPointerUp={endClipDrag} /></button>; })}</div>)}<button className="playhead" style={{ left: `${currentTime * PIXELS_PER_SECOND * zoom}px` }} aria-label="Seek playhead" onPointerDown={(event) => { event.stopPropagation(); (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId); }} onPointerMove={(event) => { if (event.buttons) { const bounds = event.currentTarget.parentElement!.getBoundingClientRect(); seekTo((event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom)); } }} /></div></div></div>
-        <div className="timeline-footer"><span><span className="kbd">Drag</span> to move · edge handles to trim · click ruler to seek</span><span>{project.clips.length} clips · Autosaved to this browser {saving === 'saved' && <Check size={11} />}</span></div>
+        <div className="timeline-toolbar"><div className="timeline-tools"><button className="tool-button selected" title="Drag over empty track space to select clips; drag a clip to move it"><span className="cursor-icon">↖</span></button><button className="tool-button" title="Split clip at playhead" onClick={() => { const clip = project.clips.find((item) => item.track === 'video' && currentTime > item.start && currentTime < item.start + item.duration); if (!clip) return; const firstDuration = currentTime - clip.start; const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: currentTime, sourceStart: clip.sourceStart + firstDuration, duration: clip.duration - firstDuration }; setProject((current) => ({ ...current, clips: [...current.clips.map((item) => item.id === clip.id ? { ...item, duration: firstDuration } : item), second] })); setSelectedClipId(second.id); setSelectedClipIds([second.id]); }}><Scissors size={15} /></button><span className="toolbar-separator" /><button className="tool-button" onClick={addTitle} title="Add title"><Type size={15} /></button><button className="tool-button" onClick={removeSelectedClip} title="Delete selected clip"><Trash2 size={15} /></button></div><div className="timeline-center">Timeline <span className="timeline-duration">{formatTime(duration)}</span></div><div className="zoom-control"><button className="tool-button" aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))}><ZoomOut size={15} /></button><input type="range" min="0.5" max="10" step="0.1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label={`Timeline zoom ${zoom.toFixed(1)} times`} /><span className="zoom-level">{zoom.toFixed(1)}×</span><button className="tool-button" aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(10, value + 0.15))}><ZoomIn size={15} /></button></div></div>
+        <div className="timeline-body">
+          <div className="track-labels"><div className="ruler-spacer" /><div className="track-label"><Video size={15} /><span>Video 1</span><span className="track-menu">···</span></div><div className="track-label"><Music2 size={15} /><span>Audio 1</span><span className="track-menu">···</span></div></div>
+          <div ref={timelineScrollRef} className="timeline-scroll" onPointerDownCapture={beginTimelineSelection} onPointerMoveCapture={updateTimelineSelection} onPointerUpCapture={(event) => finishTimelineSelection(event, true)} onPointerCancelCapture={(event) => finishTimelineSelection(event, false)}>
+            <div className="timeline-inner" style={{ width: timelineWidth }} onPointerDown={(event) => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('ruler')) { const bounds = event.currentTarget.getBoundingClientRect(); seekTo(Math.max(0, (event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom))); } }}>
+              <div className="ruler">{Array.from({ length: Math.ceil(duration / 5) + 3 }, (_, index) => <button className="ruler-tick" key={index} style={{ left: `${index * 5 * PIXELS_PER_SECOND * zoom}px` }} onClick={() => seekTo(index * 5)}>{`00:${String(index * 5).padStart(2, '0')}`}</button>)}</div>
+              {(['video', 'audio'] as const).map((track) => <div key={track} className={`track-lane ${track}-lane`} onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>
+                {project.clips.filter((clip) => clip.track === track).map((clip) => {
+                  const asset = project.assets.find((item) => item.id === clip.assetId);
+                  return <button key={clip.id} data-clip-id={clip.id} className={`timeline-clip ${asset?.kind ?? 'video'} ${selectedClipIds.includes(clip.id) ? 'selected-clip' : ''}`} style={{ left: `${clip.start * PIXELS_PER_SECOND * zoom}px`, width: `${Math.max(28, clip.duration * PIXELS_PER_SECOND * zoom)}px` }} onPointerDown={(event) => beginClipDrag(event, clip, 'move')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}>
+                    <span className="trim-handle left" title="Trim start" onPointerDown={(event) => beginClipDrag(event, clip, 'left')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} />
+                    <strong>{track === 'audio' && <Music2 size={11} />} {clip.name}</strong><small>{formatTime(clip.duration)}</small>
+                    <span className="trim-handle right" title="Trim end" onPointerDown={(event) => beginClipDrag(event, clip, 'right')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} />
+                  </button>;
+                })}
+              </div>)}
+              {selectionBox && <div className="selection-box" style={{ left: selectionBox.left, top: selectionBox.top, width: selectionBox.width, height: selectionBox.height }} />}
+              <button className="playhead" style={{ left: `${currentTime * PIXELS_PER_SECOND * zoom}px` }} aria-label="Seek playhead" onPointerDown={(event) => { event.stopPropagation(); (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId); }} onPointerMove={(event) => { if (event.buttons) { const bounds = event.currentTarget.parentElement!.getBoundingClientRect(); seekTo((event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom)); } }} />
+            </div>
+          </div>
+        </div>
+        <div className="timeline-footer"><span><span className="kbd">Drag empty space</span> to select · drag clips to move · edge handles to trim · click ruler to seek</span><span>{selectedClipIds.length > 1 ? `${selectedClipIds.length} clips selected · ` : ''}{project.clips.length} clips · Autosaved to this browser {saving === 'saved' && <Check size={11} />}</span></div>
       </section>
 
       {showProjects && <div className="modal-backdrop" onClick={() => setShowProjects(false)}><section className="project-modal" onClick={(event) => event.stopPropagation()}><header><div><h2>Open a project</h2><p>Open a local project or import a portable project file.</p></div><button className="small-icon-button" onClick={() => setShowProjects(false)}>×</button></header><div className="project-modal-actions"><button className="new-project-row" onClick={() => { newProject(); setShowProjects(false); }}><FilePlus2 size={17} /> Create a new project</button><button className="new-project-row" onClick={() => projectInputRef.current?.click()}><Upload size={16} /> Import project file</button><button className="new-project-row" onClick={() => void exportProjectFile()}><Download size={16} /> Download project file</button></div>{projectList.map((item) => <div className="project-row" key={item.id}><button onClick={() => void openProject(item.id)}><Clapperboard size={16} /><span><strong>{item.name}</strong><small>Edited {new Date(item.updatedAt).toLocaleString()}</small></span></button>{item.id !== project.id && <button className="project-delete" title="Delete project" onClick={() => { void deleteProject(item.id).then(() => void showProjectPicker()); }}><Trash2 size={14} /></button>}</div>)}</section></div>}
