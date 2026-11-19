@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { AudioLines, Check, Clapperboard, Download, FilePlus2, Film, Music2, Pause, Play, Plus, Scissors, Trash2, Type, Upload, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
+import { AudioLines, Check, Clapperboard, Download, FilePlus2, Film, Music2, Pause, Play, Plus, Scissors, Sparkles, Trash2, Type, Upload, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
 import { deleteProject, listProjects, loadProject, saveProject } from '../editor/storage';
 import { blobToDataUrl, createProject, dataUrlToBlob, formatTime, getMediaKind, readMediaDuration } from '../editor/helpers';
 import type { EditorProject, MediaAsset, ProjectSummary, TimelineClip, TrackKind } from '../editor/types';
+import { applyAnimationMask, getClipAnimationTransform } from '../editor/animations/render';
 import EditorHeader from './EditorHeader';
 import MediaPanel from './MediaPanel';
+import AnimationLibraryPanel from './AnimationLibraryPanel';
 
 const PROJECT_KEY = 'neupcut-current-project';
 const PIXELS_PER_SECOND = 12;
@@ -31,6 +33,7 @@ export default function Editor() {
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [projectList, setProjectList] = useState<ProjectSummary[]>([]);
   const [showProjects, setShowProjects] = useState(false);
+  const [activeSidebarPanel, setActiveSidebarPanel] = useState<'media' | 'animations'>('media');
   const [exporting, setExporting] = useState(false);
   const [mediaError, setMediaError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -543,12 +546,24 @@ export default function Editor() {
       const asset = project.assets.find((item) => item.id === active?.assetId);
       if (!active || !asset) {
         drawWelcomeCard(context, canvas.width, canvas.height, project.name);
-      } else if (asset.kind === 'title') {
-        drawTitleCard(context, canvas.width, canvas.height, active.name);
-      } else if (asset.kind === 'image' && imageRef.current?.complete && imageRef.current.naturalWidth) {
-        drawContained(context, imageRef.current, canvas.width, canvas.height);
-      } else if (asset.kind === 'video' && videoRef.current?.readyState && videoRef.current.readyState >= 2) {
-        drawContained(context, videoRef.current, canvas.width, canvas.height);
+      } else {
+        const transform = getClipAnimationTransform(active, currentTime);
+        context.save();
+        context.globalAlpha = transform.opacity / 100;
+        context.translate(canvas.width / 2 + transform.x * canvas.width / 100, canvas.height / 2 + transform.y * canvas.height / 100);
+        context.rotate(transform.rotation * Math.PI / 180);
+        context.scale(transform.scale / 100, transform.scale / 100);
+        context.translate(-canvas.width / 2, -canvas.height / 2);
+        context.filter = `blur(${transform.blur}px)`;
+        applyAnimationMask(context, canvas.width, canvas.height, transform.mask, transform.reveal);
+        if (asset.kind === 'title') {
+          drawTitleCard(context, canvas.width, canvas.height, active.name);
+        } else if (asset.kind === 'image' && imageRef.current?.complete && imageRef.current.naturalWidth) {
+          drawContained(context, imageRef.current, canvas.width, canvas.height);
+        } else if (asset.kind === 'video' && videoRef.current?.readyState && videoRef.current.readyState >= 2) {
+          drawContained(context, videoRef.current, canvas.width, canvas.height);
+        }
+        context.restore();
       }
       animation = requestAnimationFrame(draw);
     };
@@ -632,6 +647,22 @@ export default function Editor() {
     setSelectedClipId(clip.id);
     setSelectedClipIds([clip.id]);
   }, [currentTime]);
+
+  /** Applies a reusable animation preset to the currently selected video clip. */
+  const applyAnimation = useCallback((presetId: string, animationDuration: number) => {
+    if (!selectedClip || selectedClip.track !== 'video') return;
+    setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, animation: { presetId, duration: Math.min(animationDuration, clip.duration) } } : clip) }));
+  }, [selectedClip]);
+
+  /** Removes the animation effect from the currently selected clip. */
+  const removeAnimation = useCallback(() => {
+    if (!selectedClip) return;
+    setProject((current) => ({ ...current, clips: current.clips.map((clip) => {
+      if (clip.id !== selectedClip.id) return clip;
+      const { animation: _animation, ...clipWithoutAnimation } = clip;
+      return clipWithoutAnimation;
+    }) }));
+  }, [selectedClip]);
 
   /** Starts or pauses native playback at the current timeline position. */
   const togglePlayback = useCallback(() => {
@@ -867,9 +898,9 @@ export default function Editor() {
       />
 
       <section className="workspace">
-        <aside className="left-rail"><button className="rail-item active"><Film size={18} /><span>Media</span></button><button className="rail-item" onClick={addTitle}><Type size={18} /><span>Text</span></button><button className="rail-item" onClick={addTitle}><Plus size={18} /><span>Title</span></button><button className="rail-item" onClick={() => fileInputRef.current?.click()}><AudioLines size={18} /><span>Audio</span></button></aside>
+        <aside className="left-rail"><button className={`rail-item ${activeSidebarPanel === 'media' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('media')}><Film size={18} /><span>Media</span></button><button className={`rail-item ${activeSidebarPanel === 'animations' ? 'active' : ''}`} onClick={() => setActiveSidebarPanel('animations')}><Sparkles size={18} /><span>Animations</span></button><button className="rail-item" onClick={addTitle}><Type size={18} /><span>Text</span></button><button className="rail-item" onClick={addTitle}><Plus size={18} /><span>Title</span></button><button className="rail-item" onClick={() => fileInputRef.current?.click()}><AudioLines size={18} /><span>Audio</span></button></aside>
 
-        <MediaPanel
+        {activeSidebarPanel === 'media' ? <MediaPanel
           assets={project.assets}
           mediaError={mediaError}
           fileInputRef={fileInputRef}
@@ -877,7 +908,7 @@ export default function Editor() {
           onImportFiles={(files) => void importFiles(files)}
           onImportProject={(file) => void importProjectFile(file)}
           onAddAsset={addAssetToTimeline}
-        />
+        /> : <AnimationLibraryPanel selectedClip={selectedClip} onApply={applyAnimation} onRemove={removeAnimation} />}
 
         <section className="preview-area">
           <div className="preview-header"><div className="preview-label"><span className="live-dot" /> CANVAS PREVIEW</div><div className="preview-resolution"><button className="viewer-zoom-step" aria-label="Zoom viewer out" title="Zoom out" onClick={() => adjustViewerZoom(-0.1)}><ZoomOut size={13} /></button><button className="viewer-zoom-reset" title="Reset viewer zoom" onClick={() => { setViewerZoom(1); setViewerPan({ x: 0, y: 0 }); }}>{Math.round(viewerZoom * 100)}%</button><button className="viewer-zoom-step" aria-label="Zoom viewer in" title="Zoom in" onClick={() => adjustViewerZoom(0.1)}><ZoomIn size={13} /></button> 1280 × 720 <span>·</span> {formatTime(currentTime)}</div></div>

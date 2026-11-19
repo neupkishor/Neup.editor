@@ -62,6 +62,25 @@ button { color: inherit; }
 .play-button:hover { background: #956cd7; }.pause-glyph { font-size: 16px; font-weight: 700; }
 .transport-right { display: flex; justify-content: flex-end; gap: 12px; align-items: center; }.quality-button { border: 1px solid #303037; background: #1b1c20; color: #aaa7b2; border-radius: 4px; padding: 5px 8px; font-size: 9px; }.quality-button span { margin-left: 8px; }
 .properties-panel { border-left: 1px solid #25262c; padding: 19px 15px; }
+.animation-library-panel { overflow: hidden; }
+.animation-target { min-height: 52px; display: flex; align-items: center; gap: 8px; margin-top: 19px; padding: 9px; border: 1px solid #34313b; border-radius: 6px; color: #96929f; background: #1e1d23; font-size: 9px; line-height: 1.5; }
+.animation-target svg { flex: 0 0 auto; color: #b08ce1; }
+.animation-target strong { color: #dedbe5; font-weight: 500; }
+.animation-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 16px; padding: 3px; background: #111216; border-radius: 6px; }
+.animation-tabs button { border: 0; border-radius: 4px; padding: 7px; color: #85818e; background: transparent; font-size: 9px; cursor: pointer; }
+.animation-tabs button.active { color: #d8c4f4; background: #332942; }
+.animation-duration { display: flex; align-items: center; gap: 7px; margin-top: 14px; color: #97939f; font-size: 9px; }
+.animation-duration input { width: 58px; height: 27px; padding: 0 6px; border: 1px solid #303038; border-radius: 4px; color: #dedbe5; background: #202126; font-size: 9px; }
+.animation-preset-list { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 7px; margin-top: 12px; overflow-y: auto; }
+.animation-preset { display: grid; grid-template-columns: 30px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 9px 7px; border: 1px solid #2b2a31; border-radius: 6px; background: #1c1d21; }
+.animation-preset.applied { border-color: #765b9d; background: #25202d; }
+.animation-preset-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 5px; color: #c6a7ee; background: #352b43; }
+.animation-preset-copy { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.animation-preset-copy strong { overflow: hidden; color: #d8d5df; font-size: 9px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.animation-preset-copy small { color: #85818e; font-size: 8px; line-height: 1.4; }
+.animation-preset > button { min-width: 42px; border: 1px solid #41394c; border-radius: 4px; padding: 5px; color: #c9afea; background: #292330; font-size: 8px; cursor: pointer; }
+.animation-preset > button:disabled { opacity: .4; cursor: default; }
+.remove-animation { margin-top: 10px; border: 0; color: #cf9b9b; background: transparent; font-size: 9px; text-align: left; cursor: pointer; }
 .muted-icon { color: #777580; }
 .properties-content { margin-top: 20px; }
 .property-preview { height: 87px; border: 1px solid #2c2b33; border-radius: 7px; background: #1e1d24; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: #85818e; font-size: 9px; }

@@ -1,6 +1,11 @@
 export type MediaKind = 'video' | 'audio' | 'image' | 'title';
 export type TrackKind = 'video' | 'audio';
 
+export type ClipAnimationEffect = {
+  presetId: string;
+  duration: number;
+};
+
 export type MediaAsset = {
   id: string;
   name: string;
@@ -19,6 +24,7 @@ export type TimelineClip = {
   start: number;
   duration: number;
   sourceStart: number;
+  animation?: ClipAnimationEffect;
 };
 
 export type EditorProject = {
