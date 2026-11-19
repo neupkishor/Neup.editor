@@ -4,7 +4,7 @@ const FRAME_RATE = 30;
 
 /** Creates a new empty video editing project. */
 export function createProject(): EditorProject {
-  return { id: crypto.randomUUID(), name: 'Untitled project', updatedAt: Date.now(), assets: [], clips: [], timelineView: { zoom: 1, scrollLeft: 0 } };
+  return { id: crypto.randomUUID(), name: 'Untitled project', updatedAt: Date.now(), assets: [], clips: [], trackCount: 1, timelineView: { zoom: 1, scrollLeft: 0 } };
 }
 
 /** Formats timeline time as minutes, seconds, and frames. */

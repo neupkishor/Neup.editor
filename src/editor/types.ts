@@ -26,6 +26,7 @@ export type TimelineClip = {
   assetId: string;
   name: string;
   track: TrackKind;
+  trackIndex?: number;
   start: number;
   duration: number;
   sourceStart: number;
@@ -39,6 +40,9 @@ export type EditorProject = {
   updatedAt: number;
   assets: MediaAsset[];
   clips: TimelineClip[];
+  trackCount?: number;
+  /** Legacy lane counts retained only while opening older saved projects. */
+  trackCounts?: Record<TrackKind, number>;
   timelineView?: { zoom: number; scrollLeft: number };
 };
 

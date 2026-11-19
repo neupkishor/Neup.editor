@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { AudioLines, Check, Clapperboard, Download, FilePlus2, Film, Music2, Pause, Play, Plus, Scissors, SlidersHorizontal, Sparkles, Trash2, Type, Upload, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
+import { AudioLines, Check, Clapperboard, Download, FilePlus2, Film, Music2, Pause, Play, Plus, Scissors, SlidersHorizontal, Sparkles, Trash2, Type, Upload, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
 import { deleteProject, listProjects, loadProject, saveProject } from '../editor/storage';
 import { blobToDataUrl, createProject, dataUrlToBlob, formatTime, getMediaKind, readMediaDuration } from '../editor/helpers';
 import type { ClipEffect, EditorProject, MediaAsset, ProjectSummary, TimelineClip, TrackKind } from '../editor/types';
@@ -19,6 +19,49 @@ type DragState = { clipId: string; mode: 'move' | 'left' | 'right'; pointerX: nu
 type SelectionBox = { pointerId: number; startX: number; startY: number; currentX: number; currentY: number; left: number; top: number; width: number; height: number };
 type ProjectHistory = { projectId: string; past: EditorProject[]; present: EditorProject; future: EditorProject[]; pendingBefore: EditorProject | null; timer: number | null };
 
+/** Returns the persisted lane number, treating older projects as lane one. */
+function clipTrackIndex(clip: TimelineClip): number {
+  return clip.trackIndex ?? 0;
+}
+
+/** Finds the closest non-overlapping start position on a specific lane. */
+function findOpenClipStart(clips: TimelineClip[], trackIndex: number, requestedStart: number, duration: number, excludeId?: string): number {
+  const occupied = clips.filter((clip) => clip.id !== excludeId && clipTrackIndex(clip) === trackIndex)
+    .map((clip) => ({ start: clip.start, end: clip.start + clip.duration }))
+    .sort((first, second) => first.start - second.start);
+  const candidates: number[] = [Math.max(0, requestedStart)];
+  let gapStart = 0;
+  for (const range of occupied) {
+    if (range.start - gapStart >= duration) candidates.push(Math.max(gapStart, Math.min(requestedStart, range.start - duration)));
+    gapStart = Math.max(gapStart, range.end);
+  }
+  candidates.push(Math.max(gapStart, requestedStart));
+  return candidates.filter((start) => !occupied.some((range) => start < range.end && start + duration > range.start))
+    .sort((first, second) => Math.abs(first - requestedStart) - Math.abs(second - requestedStart))[0] ?? Math.max(gapStart, requestedStart);
+}
+
+/** Finds the highest existing lane that can fit a clip at its requested time. */
+function findAvailableTopTrack(clips: TimelineClip[], trackCount: number, start: number, duration: number): number {
+  for (let index = trackCount - 1; index >= 0; index -= 1) {
+    const occupied = clips.some((clip) => clipTrackIndex(clip) === index && start < clip.start + clip.duration && start + duration > clip.start);
+    if (!occupied) return index;
+  }
+  return trackCount;
+}
+
+/** Converts older audio and video lane groups into one shared set of lanes. */
+function normalizeProjectTracks(project: EditorProject): EditorProject {
+  if (project.trackCount !== undefined) return project;
+  const videoLaneCount = Math.max(1, project.trackCounts?.video ?? 1);
+  const audioLaneCount = Math.max(1, project.trackCounts?.audio ?? 1);
+  const { trackCounts: _legacyTrackCounts, ...rest } = project;
+  return {
+    ...rest,
+    trackCount: videoLaneCount + audioLaneCount,
+    clips: project.clips.map((clip) => ({ ...clip, trackIndex: clipTrackIndex(clip) + (clip.track === 'audio' ? videoLaneCount : 0) })),
+  };
+}
+
 /** Provides a working browser based video editor with local projects and export. */
 export default function Editor() {
   const [project, setProject] = useState<EditorProject>(() => createProject());
@@ -29,6 +72,7 @@ export default function Editor() {
   const [saving, setSaving] = useState<'saved' | 'saving' | 'error'>('saved');
   const [zoom, setZoom] = useState(1);
   const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
+  const [timelineScrollTop, setTimelineScrollTop] = useState(0);
   const [viewerZoom, setViewerZoom] = useState(1);
   const [viewerPan, setViewerPan] = useState({ x: 0, y: 0 });
   const [viewerPanning, setViewerPanning] = useState(false);
@@ -76,11 +120,12 @@ export default function Editor() {
     return urls;
   }, [project.assets]);
   const duration = useMemo(() => project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0), [project.clips]);
-  const activeVideo = project.clips.find((clip) => clip.track === 'video' && currentTime >= clip.start && currentTime < clip.start + clip.duration);
+  const activeVideo = project.clips.filter((clip) => clip.track === 'video' && currentTime >= clip.start && currentTime < clip.start + clip.duration).sort((first, second) => clipTrackIndex(second) - clipTrackIndex(first))[0];
   const activeAudio = project.clips.find((clip) => clip.track === 'audio' && currentTime >= clip.start && currentTime < clip.start + clip.duration);
   const activeVideoAsset = project.assets.find((asset) => asset.id === activeVideo?.assetId);
   const activeAudioAsset = project.assets.find((asset) => asset.id === activeAudio?.assetId);
   const selectedClip = project.clips.find((clip) => clip.id === selectedClipId);
+  const trackRows = useMemo(() => Array.from({ length: Math.max(1, project.trackCount ?? 1, ...project.clips.map((clip) => clipTrackIndex(clip) + 1)) }, (_, index) => index), [project.clips, project.trackCount]);
   const timelineWidth = Math.max(800, (duration + 12) * PIXELS_PER_SECOND * zoom);
 
   /** Saves the current project and timeline viewport immediately. */
@@ -418,7 +463,7 @@ export default function Editor() {
       const stored = projectId ? await loadProject(projectId).catch(() => undefined) : undefined;
       if (cancelled) return;
       if (stored) {
-        setProject(stored);
+        setProject(normalizeProjectTracks(stored));
         restoreTimelineView(stored.timelineView);
       }
       else {
@@ -551,7 +596,7 @@ export default function Editor() {
       if (!canvas || !context) return;
       context.fillStyle = '#0e1015';
       context.fillRect(0, 0, canvas.width, canvas.height);
-      const active = project.clips.find((clip) => clip.track === 'video' && currentTime >= clip.start && currentTime < clip.start + clip.duration);
+      const active = project.clips.filter((clip) => clip.track === 'video' && currentTime >= clip.start && currentTime < clip.start + clip.duration).sort((first, second) => clipTrackIndex(second) - clipTrackIndex(first))[0];
       const asset = project.assets.find((item) => item.id === active?.assetId);
       if (!active || !asset) {
         drawWelcomeCard(context, canvas.width, canvas.height, project.name);
@@ -629,8 +674,7 @@ export default function Editor() {
   const importFiles = useCallback(async (files: FileList | File[]) => {
     const imported: MediaAsset[] = [];
     const added: TimelineClip[] = [];
-    let nextVideoStart = project.clips.filter((clip) => clip.track === 'video').reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
-    let nextAudioStart = project.clips.filter((clip) => clip.track === 'audio').reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
+    let nextStart = project.clips.filter((clip) => clipTrackIndex(clip) === 0).reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
     for (const file of Array.from(files)) {
       const kind = getMediaKind(file);
       if (!kind) continue;
@@ -639,10 +683,8 @@ export default function Editor() {
       const asset: MediaAsset = { id, name: file.name, kind, mimeType: file.type, size: file.size, duration: mediaDuration, blob: file };
       imported.push(asset);
       const track: TrackKind = kind === 'audio' ? 'audio' : 'video';
-      const start = track === 'audio' ? nextAudioStart : nextVideoStart;
-      added.push({ id: crypto.randomUUID(), assetId: id, name: file.name, track, start, duration: Math.max(0.5, mediaDuration), sourceStart: 0 });
-      if (track === 'audio') nextAudioStart += mediaDuration;
-      else nextVideoStart += mediaDuration;
+      added.push({ id: crypto.randomUUID(), assetId: id, name: file.name, track, trackIndex: 0, start: nextStart, duration: Math.max(0.5, mediaDuration), sourceStart: 0 });
+      nextStart += mediaDuration;
     }
     if (imported.length) {
       setProject((current) => ({ ...current, assets: [...current.assets, ...imported], clips: [...current.clips, ...added] }));
@@ -656,8 +698,8 @@ export default function Editor() {
   /** Creates a text card and places it at the current playhead position. */
   const addTitle = useCallback(() => {
     const asset: MediaAsset = { id: crypto.randomUUID(), name: 'Your title', kind: 'title', mimeType: 'text/plain', size: 0, duration: 5 };
-    const clip: TimelineClip = { id: crypto.randomUUID(), assetId: asset.id, name: asset.name, track: 'video', start: currentTime, duration: 5, sourceStart: 0 };
-    setProject((current) => ({ ...current, assets: [...current.assets, asset], clips: [...current.clips, clip] }));
+    const clip: TimelineClip = { id: crypto.randomUUID(), assetId: asset.id, name: asset.name, track: 'video', trackIndex: 0, start: currentTime, duration: 5, sourceStart: 0 };
+    setProject((current) => ({ ...current, assets: [...current.assets, asset], clips: [...current.clips, { ...clip, start: findOpenClipStart(current.clips, 0, clip.start, clip.duration) }] }));
     setSelectedClipId(clip.id);
     setSelectedClipIds([clip.id]);
   }, [currentTime]);
@@ -665,11 +707,23 @@ export default function Editor() {
   /** Adds another instance of an existing media asset at the playhead. */
   const addAssetToTimeline = useCallback((asset: MediaAsset) => {
     const track: TrackKind = asset.kind === 'audio' ? 'audio' : 'video';
-    const clip: TimelineClip = { id: crypto.randomUUID(), assetId: asset.id, name: asset.name, track, start: currentTime, duration: Math.max(0.5, asset.duration), sourceStart: 0 };
-    setProject((current) => ({ ...current, clips: [...current.clips, clip] }));
+    const clip: TimelineClip = { id: crypto.randomUUID(), assetId: asset.id, name: asset.name, track, trackIndex: 0, start: currentTime, duration: Math.max(0.5, asset.duration), sourceStart: 0 };
+    setProject((current) => {
+      const laneCount = Math.max(current.trackCount ?? 1, ...current.clips.map((item) => clipTrackIndex(item) + 1));
+      const trackIndex = findAvailableTopTrack(current.clips, laneCount, currentTime, clip.duration);
+      return { ...current, trackCount: Math.max(laneCount, trackIndex + 1), clips: [...current.clips, { ...clip, trackIndex, start: currentTime }] };
+    });
     setSelectedClipId(clip.id);
     setSelectedClipIds([clip.id]);
   }, [currentTime]);
+
+  /** Adds another shared timeline lane for any kind of clip. */
+  const addTrack = () => {
+    setProject((current) => {
+      const existingCount = Math.max(current.trackCount ?? 1, ...current.clips.map((clip) => clipTrackIndex(clip) + 1));
+      return { ...current, trackCount: existingCount + 1 };
+    });
+  };
 
   /** Applies a reusable animation preset to the currently selected video clip. */
   const applyAnimation = useCallback((presetId: string, animationDuration: number) => {
@@ -708,7 +762,7 @@ export default function Editor() {
     setCurrentTime(0);
     setSelectedClipId(null);
     setSelectedClipIds([]);
-    setProject(stored);
+    setProject(normalizeProjectTracks(stored));
     restoreTimelineView(stored.timelineView);
     localStorage.setItem(PROJECT_KEY, id);
     setShowProjects(false);
@@ -753,7 +807,7 @@ export default function Editor() {
     try {
       const archive = JSON.parse(await file.text()) as { format?: string; version?: number; project?: Omit<EditorProject, 'assets'> & { assets: Array<Omit<MediaAsset, 'blob'> & { blobData?: string }> } };
       if (archive.format !== 'neupcut-project' || archive.version !== 1 || !archive.project?.id || !Array.isArray(archive.project.assets) || !Array.isArray(archive.project.clips)) throw new Error('That file is not a supported Neup Cut project.');
-      const restored: EditorProject = { ...archive.project, assets: archive.project.assets.map(({ blobData, ...asset }) => ({ ...asset, blob: blobData ? dataUrlToBlob(blobData) : undefined })) };
+      const restored = normalizeProjectTracks({ ...archive.project, assets: archive.project.assets.map(({ blobData, ...asset }) => ({ ...asset, blob: blobData ? dataUrlToBlob(blobData) : undefined })) });
       setProject(restored);
       restoreTimelineView(restored.timelineView);
       setSelectedClipId(null);
@@ -833,7 +887,7 @@ export default function Editor() {
       setSelectedClipIds([clip.id]);
     }
     const asset = project.assets.find((item) => item.id === clip.assetId);
-    dragRef.current = { clipId: clip.id, mode, pointerX: event.clientX, start: clip.start, duration: clip.duration, sourceStart: clip.sourceStart, maxDuration: asset?.duration ?? Number.POSITIVE_INFINITY, track: clip.track };
+    dragRef.current = { clipId: clip.id, mode, pointerX: event.clientX, start: clip.start, duration: clip.duration, sourceStart: clip.sourceStart, maxDuration: asset?.kind === 'image' ? Number.POSITIVE_INFINITY : asset?.duration ?? Number.POSITIVE_INFINITY, track: clip.track };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
@@ -844,12 +898,17 @@ export default function Editor() {
     const delta = Math.round(((event.clientX - drag.pointerX) / (PIXELS_PER_SECOND * zoom)) * FRAME_RATE) / FRAME_RATE;
     setProject((current) => ({ ...current, clips: current.clips.map((clip) => {
       if (clip.id !== drag.clipId) return clip;
-      if (drag.mode === 'move') return { ...clip, start: Math.max(0, Math.round((drag.start + delta) * FRAME_RATE) / FRAME_RATE) };
+      if (drag.mode === 'move') {
+        const requested = Math.max(0, Math.round((drag.start + delta) * FRAME_RATE) / FRAME_RATE);
+        return { ...clip, start: findOpenClipStart(current.clips, clipTrackIndex(clip), requested, clip.duration, clip.id) };
+      }
       if (drag.mode === 'left') {
-        const shift = Math.max(-drag.sourceStart, Math.min(Math.min(drag.duration - 0.25, drag.maxDuration - drag.sourceStart - 0.25), delta));
+        const previousEnd = current.clips.filter((item) => item.id !== clip.id && clipTrackIndex(item) === clipTrackIndex(clip) && item.start + item.duration <= drag.start).reduce((end, item) => Math.max(end, item.start + item.duration), 0);
+        const shift = Math.max(previousEnd - drag.start, -drag.sourceStart, Math.min(Math.min(drag.duration - 0.25, drag.maxDuration - drag.sourceStart - 0.25), delta));
         return { ...clip, start: Math.max(0, drag.start + shift), duration: Math.max(0.25, drag.duration - shift), sourceStart: Math.max(0, drag.sourceStart + shift) };
       }
-      return { ...clip, duration: Math.max(0.25, Math.min(drag.maxDuration - drag.sourceStart, drag.duration + delta)) };
+      const nextStart = current.clips.filter((item) => item.id !== clip.id && clipTrackIndex(item) === clipTrackIndex(clip) && item.start >= drag.start + drag.duration).reduce((start, item) => Math.min(start, item.start), Number.POSITIVE_INFINITY);
+      return { ...clip, duration: Math.max(0.25, Math.min(drag.maxDuration - drag.sourceStart, nextStart - clip.start, drag.duration + delta)) };
     }) }));
   };
 
@@ -957,22 +1016,22 @@ export default function Editor() {
           <div className="transport"><div className="time-readout"><span>{formatTime(currentTime)}</span><span className="time-divider">/</span><span className="time-total">{formatTime(duration)}</span></div><button className="play-button" onClick={togglePlayback} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button><div className="transport-right"><button className="icon-button" aria-label="Audio volume"><Volume2 size={17} /></button><button className="quality-button">30 FPS <span>·</span> 720p</button></div></div>
         </section>
 
-        {showRightSidebar && <aside className="properties-panel"><div className="panel-heading"><div><h2>Clip properties</h2><p>{selectedClip?.name ?? 'Select a clip on the timeline'}</p></div><Scissors size={17} className="muted-icon" /></div>{selectedClip ? <div className="properties-content"><label className="field-label">CLIP NAME<input value={selectedClip.name} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, name: event.target.value } : clip) }))} /></label><div className="property-grid"><label className="field-label">START<input type="number" min="0" step="0.1" value={selectedClip.start.toFixed(2)} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, start: Math.max(0, Number(event.target.value)) } : clip) }))} /></label><label className="field-label">DURATION<input type="number" min="0.25" step="0.1" value={selectedClip.duration.toFixed(2)} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, duration: Math.max(0.25, Number(event.target.value)) } : clip) }))} /></label></div><label className="field-label">TRACK<select value={selectedClip.track} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, track: event.target.value as TrackKind } : clip) }))}><option value="video">Video 1</option><option value="audio">Audio 1</option></select></label><button className="delete-clip" onClick={removeSelectedClip}><Trash2 size={14} /> Remove clip</button></div> : <div className="properties-empty"><span className="property-preview-icon"><Scissors size={22} /></span>Click a timeline clip to edit its name, start, duration, or track.</div>}</aside>}
+        {showRightSidebar && <aside className="properties-panel"><div className="panel-heading"><div><h2>Clip properties</h2><p>{selectedClip?.name ?? 'Select a clip on the timeline'}</p></div><Scissors size={17} className="muted-icon" /></div>{selectedClip ? <div className="properties-content"><label className="field-label">CLIP NAME<input value={selectedClip.name} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, name: event.target.value } : clip) }))} /></label><div className="property-grid"><label className="field-label">START<input type="number" min="0" step="0.1" value={selectedClip.start.toFixed(2)} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, start: findOpenClipStart(current.clips, clipTrackIndex(clip), Math.max(0, Number(event.target.value)), clip.duration, clip.id) } : clip) }))} /></label><label className="field-label">DURATION<input type="number" min="0.25" step="0.1" value={selectedClip.duration.toFixed(2)} onChange={(event) => setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, duration: Math.max(0.25, Math.min(current.clips.filter((item) => item.id !== clip.id && clipTrackIndex(item) === clipTrackIndex(clip) && item.start >= clip.start + clip.duration).reduce((start, item) => Math.min(start, item.start), Number.POSITIVE_INFINITY) - clip.start, Number(event.target.value))) } : clip) }))} /></label></div><label className="field-label">TRACK<select value={clipTrackIndex(selectedClip)} onChange={(event) => { const trackIndex = Number(event.target.value); setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, trackIndex, start: findOpenClipStart(current.clips, trackIndex, clip.start, clip.duration, clip.id) } : clip) })); }}>{trackRows.map((index) => <option key={index} value={index}>Track {index + 1}</option>)}</select></label><button className="delete-clip" onClick={removeSelectedClip}><Trash2 size={14} /> Remove clip</button></div> : <div className="properties-empty"><span className="property-preview-icon"><Scissors size={22} /></span>Click a timeline clip to edit its name, start, duration, or track.</div>}</aside>}
       </section>
 
       {showTimeline && <section className="timeline-section">
-        <div className="timeline-toolbar"><div className="timeline-tools"><button className="tool-button selected" title="Drag over empty track space to select clips; drag a clip to move it"><span className="cursor-icon">↖</span></button><button className="tool-button" title="Split clip at playhead" onClick={() => { const clip = project.clips.find((item) => item.track === 'video' && currentTime > item.start && currentTime < item.start + item.duration); if (!clip) return; const firstDuration = currentTime - clip.start; const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: currentTime, sourceStart: clip.sourceStart + firstDuration, duration: clip.duration - firstDuration }; setProject((current) => ({ ...current, clips: [...current.clips.map((item) => item.id === clip.id ? { ...item, duration: firstDuration } : item), second] })); setSelectedClipId(second.id); setSelectedClipIds([second.id]); }}><Scissors size={15} /></button><span className="toolbar-separator" /><button className="tool-button" onClick={addTitle} title="Add title"><Type size={15} /></button><button className="tool-button" onClick={removeSelectedClip} title="Delete selected clip"><Trash2 size={15} /></button></div><div className="timeline-center">Timeline <span className="timeline-duration">{formatTime(duration)}</span></div><div className="zoom-control"><button className="tool-button" aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))}><ZoomOut size={15} /></button><input type="range" min="0.5" max="10" step="0.1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label={`Timeline zoom ${zoom.toFixed(1)} times`} /><span className="zoom-level">{zoom.toFixed(1)}×</span><button className="tool-button" aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(10, value + 0.15))}><ZoomIn size={15} /></button></div></div>
+        <div className="timeline-toolbar"><div className="timeline-tools"><button className="tool-button selected" title="Drag over empty track space to select clips; drag a clip to move it"><span className="cursor-icon">↖</span></button><button className="tool-button" title="Split clip at playhead" onClick={() => { const clip = project.clips.find((item) => item.track === 'video' && currentTime > item.start && currentTime < item.start + item.duration); if (!clip) return; const firstDuration = currentTime - clip.start; const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: currentTime, sourceStart: clip.sourceStart + firstDuration, duration: clip.duration - firstDuration }; setProject((current) => ({ ...current, clips: [...current.clips.map((item) => item.id === clip.id ? { ...item, duration: firstDuration } : item), second] })); setSelectedClipId(second.id); setSelectedClipIds([second.id]); }}><Scissors size={15} /></button><span className="toolbar-separator" /><button className="tool-button track-add-button" onClick={addTrack} title="Add track"><Plus size={15} /></button><button className="tool-button" onClick={addTitle} title="Add title"><Type size={15} /></button><button className="tool-button" onClick={removeSelectedClip} title="Delete selected clip"><Trash2 size={15} /></button></div><div className="timeline-center">Timeline <span className="timeline-duration">{formatTime(duration)}</span></div><div className="zoom-control"><button className="tool-button" aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))}><ZoomOut size={15} /></button><input type="range" min="0.5" max="10" step="0.1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label={`Timeline zoom ${zoom.toFixed(1)} times`} /><span className="zoom-level">{zoom.toFixed(1)}×</span><button className="tool-button" aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(10, value + 0.15))}><ZoomIn size={15} /></button></div></div>
         <div className="timeline-body">
-          <div className="track-labels"><div className="ruler-spacer" /><div className="track-label"><Video size={15} /><span>Video 1</span><span className="track-menu">···</span></div><div className="track-label"><Music2 size={15} /><span>Audio 1</span><span className="track-menu">···</span></div></div>
-          <div ref={timelineScrollRef} className="timeline-scroll" onScroll={(event) => setTimelineScrollLeft(event.currentTarget.scrollLeft)} onPointerDownCapture={beginTimelineSelection} onPointerMoveCapture={updateTimelineSelection} onPointerUpCapture={(event) => finishTimelineSelection(event, true)} onPointerCancelCapture={(event) => finishTimelineSelection(event, false)}>
+          <div className="track-labels"><div className="ruler-spacer" /><div className="track-label-rows" style={{ transform: `translateY(-${timelineScrollTop}px)` }}>{[...trackRows].reverse().map((index) => <div className="track-label" key={index}><span>Track {index + 1}</span><span className="track-menu">···</span></div>)}</div></div>
+          <div ref={timelineScrollRef} className="timeline-scroll" onScroll={(event) => { setTimelineScrollLeft(event.currentTarget.scrollLeft); setTimelineScrollTop(event.currentTarget.scrollTop); }} onPointerDownCapture={beginTimelineSelection} onPointerMoveCapture={updateTimelineSelection} onPointerUpCapture={(event) => finishTimelineSelection(event, true)} onPointerCancelCapture={(event) => finishTimelineSelection(event, false)}>
             <div className="timeline-inner" style={{ width: timelineWidth }} onPointerDown={(event) => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('ruler')) { const bounds = event.currentTarget.getBoundingClientRect(); seekTo(Math.max(0, (event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom))); } }}>
               <div className="ruler">{Array.from({ length: Math.ceil(duration / 5) + 3 }, (_, index) => <button className="ruler-tick" key={index} style={{ left: `${index * 5 * PIXELS_PER_SECOND * zoom}px` }} onClick={() => seekTo(index * 5)}>{`00:${String(index * 5).padStart(2, '0')}`}</button>)}</div>
-              {(['video', 'audio'] as const).map((track) => <div key={track} className={`track-lane ${track}-lane`} onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>
-                {project.clips.filter((clip) => clip.track === track).map((clip) => {
+              {[...trackRows].reverse().map((index) => <div key={index} className="track-lane" onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>
+                {project.clips.filter((clip) => clipTrackIndex(clip) === index).map((clip) => {
                   const asset = project.assets.find((item) => item.id === clip.assetId);
                   return <button key={clip.id} data-clip-id={clip.id} className={`timeline-clip ${asset?.kind ?? 'video'} ${selectedClipIds.includes(clip.id) ? 'selected-clip' : ''}`} style={{ left: `${clip.start * PIXELS_PER_SECOND * zoom}px`, width: `${Math.max(28, clip.duration * PIXELS_PER_SECOND * zoom)}px` }} onPointerDown={(event) => beginClipDrag(event, clip, 'move')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}>
                     <span className="trim-handle left" title="Trim start" onPointerDown={(event) => beginClipDrag(event, clip, 'left')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} />
-                    <strong>{track === 'audio' && <Music2 size={11} />} {clip.name}</strong><small>{formatTime(clip.duration)}</small>
+                    <strong>{clip.track === 'audio' && <Music2 size={11} />} {clip.name}</strong><small>{formatTime(clip.duration)}</small>
                     <span className="trim-handle right" title="Trim end" onPointerDown={(event) => beginClipDrag(event, clip, 'right')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} />
                   </button>;
                 })}
