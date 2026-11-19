@@ -27,6 +27,7 @@ export type EditorProject = {
   updatedAt: number;
   assets: MediaAsset[];
   clips: TimelineClip[];
+  timelineView?: { zoom: number; scrollLeft: number };
 };
 
 export type ProjectSummary = Pick<EditorProject, 'id' | 'name' | 'updatedAt'>;

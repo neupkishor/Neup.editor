@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { AudioLines, Check, Clapperboard, Download, FilePlus2, Film, FolderOpen, ImagePlus, Music2, Pause, Play, Plus, Save, Scissors, Settings2, Trash2, Type, Upload, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
+import { AudioLines, Check, Clapperboard, Download, FilePlus2, Film, Music2, Pause, Play, Plus, Scissors, Trash2, Type, Upload, Video, Volume2, ZoomIn, ZoomOut } from 'lucide-react';
 import { deleteProject, listProjects, loadProject, saveProject } from '../editor/storage';
-import type { EditorProject, MediaAsset, MediaKind, ProjectSummary, TimelineClip, TrackKind } from '../editor/types';
+import { blobToDataUrl, createProject, dataUrlToBlob, formatTime, getMediaKind, readMediaDuration } from '../editor/helpers';
+import type { EditorProject, MediaAsset, ProjectSummary, TimelineClip, TrackKind } from '../editor/types';
+import EditorHeader from './EditorHeader';
+import MediaPanel from './MediaPanel';
 
 const PROJECT_KEY = 'neupcut-current-project';
 const PIXELS_PER_SECOND = 12;
@@ -9,49 +12,17 @@ const FRAME_RATE = 30;
 
 type DragState = { clipId: string; mode: 'move' | 'left' | 'right'; pointerX: number; start: number; duration: number; sourceStart: number; maxDuration: number; track: TrackKind };
 type SelectionBox = { pointerId: number; startX: number; startY: number; currentX: number; currentY: number; left: number; top: number; width: number; height: number };
-
-/** Creates a new empty video editing project. */
-function createProject(): EditorProject {
-  return { id: crypto.randomUUID(), name: 'Untitled project', updatedAt: Date.now(), assets: [], clips: [] };
-}
-
-/** Formats timeline time as minutes, seconds, and frames. */
-function formatTime(seconds: number): string {
-  const safeTime = Math.max(0, seconds);
-  const minutes = Math.floor(safeTime / 60).toString().padStart(2, '0');
-  const remainder = Math.floor(safeTime % 60).toString().padStart(2, '0');
-  const frames = Math.floor((safeTime % 1) * FRAME_RATE).toString().padStart(2, '0');
-  return `${minutes}:${remainder}:${frames}`;
-}
-
-/** Loads duration metadata for a browser-supported audio or video file. */
-function readMediaDuration(file: File): Promise<number> {
-  if (file.type.startsWith('image/')) return Promise.resolve(5);
-  return new Promise((resolve) => {
-    const media = document.createElement(file.type.startsWith('audio/') ? 'audio' : 'video');
-    const source = URL.createObjectURL(file);
-    media.preload = 'metadata';
-    media.onloadedmetadata = () => { URL.revokeObjectURL(source); resolve(Number.isFinite(media.duration) ? media.duration : 5); };
-    media.onerror = () => { URL.revokeObjectURL(source); resolve(5); };
-    media.src = source;
-  });
-}
-
-/** Maps a MIME type to the editor's supported media category. */
-function getMediaKind(file: File): MediaKind | null {
-  if (file.type.startsWith('video/')) return 'video';
-  if (file.type.startsWith('audio/')) return 'audio';
-  if (file.type.startsWith('image/')) return 'image';
-  return null;
-}
+type ProjectHistory = { projectId: string; past: EditorProject[]; present: EditorProject; future: EditorProject[]; pendingBefore: EditorProject | null; timer: number | null };
 
 /** Provides a working browser based video editor with local projects and export. */
 export default function Editor() {
   const [project, setProject] = useState<EditorProject>(() => createProject());
+  const [, setHistoryRevision] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [saving, setSaving] = useState<'saved' | 'saving' | 'error'>('saved');
   const [zoom, setZoom] = useState(1);
+  const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
   const [viewerZoom, setViewerZoom] = useState(1);
   const [viewerPan, setViewerPan] = useState({ x: 0, y: 0 });
   const [viewerPanning, setViewerPanning] = useState(false);
@@ -81,6 +52,9 @@ export default function Editor() {
   const timeRef = useRef(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const exportChunksRef = useRef<Blob[]>([]);
+  const historyRef = useRef<ProjectHistory | null>(null);
+  const canUndo = Boolean(historyRef.current?.past.length || historyRef.current?.pendingBefore);
+  const canRedo = Boolean(historyRef.current?.future.length);
 
   const assetUrls = useMemo(() => {
     const urls = new Map<string, string>();
@@ -96,6 +70,24 @@ export default function Editor() {
   const activeAudioAsset = project.assets.find((asset) => asset.id === activeAudio?.assetId);
   const selectedClip = project.clips.find((clip) => clip.id === selectedClipId);
   const timelineWidth = Math.max(800, (duration + 12) * PIXELS_PER_SECOND * zoom);
+
+  /** Saves the current project and timeline viewport immediately. */
+  const saveNow = () => {
+    setSaving('saving');
+    const updated = { ...project, updatedAt: Date.now(), timelineView: { zoom, scrollLeft: timelineScrollRef.current?.scrollLeft ?? timelineScrollLeft } };
+    void saveProject(updated).then(() => setSaving('saved')).catch(() => setSaving('error'));
+  };
+
+  /** Restores timeline zoom and horizontal position from the saved project. */
+  const restoreTimelineView = (view?: EditorProject['timelineView']) => {
+    const nextZoom = Math.max(0.5, Math.min(10, view?.zoom ?? 1));
+    const nextScrollLeft = Math.max(0, view?.scrollLeft ?? 0);
+    setZoom(nextZoom);
+    setTimelineScrollLeft(nextScrollLeft);
+    requestAnimationFrame(() => {
+      if (timelineScrollRef.current) timelineScrollRef.current.scrollLeft = nextScrollLeft;
+    });
+  };
 
   /** Zooms around the gesture midpoint and keeps that timeline point in place. */
   const zoomAroundPoint = (nextZoom: number, clientX: number) => {
@@ -412,7 +404,10 @@ export default function Editor() {
       const projectId = localStorage.getItem(PROJECT_KEY);
       const stored = projectId ? await loadProject(projectId).catch(() => undefined) : undefined;
       if (cancelled) return;
-      if (stored) setProject(stored);
+      if (stored) {
+        setProject(stored);
+        restoreTimelineView(stored.timelineView);
+      }
       else {
         const blank = createProject();
         setProject(blank);
@@ -428,14 +423,87 @@ export default function Editor() {
   useEffect(() => {
     setSaving('saving');
     const timer = window.setTimeout(() => {
-      const updated = { ...project, updatedAt: Date.now() };
+      const updated = { ...project, updatedAt: Date.now(), timelineView: { zoom, scrollLeft: timelineScrollRef.current?.scrollLeft ?? timelineScrollLeft } };
       void saveProject(updated).then(() => {
         setSaving('saved');
         localStorage.setItem(PROJECT_KEY, project.id);
       }).catch(() => setSaving('error'));
     }, 450);
     return () => window.clearTimeout(timer);
+  }, [project, zoom, timelineScrollLeft]);
+
+  /** Records project edits as undo steps, grouping rapid changes such as clip drags. */
+  useEffect(() => {
+    const history = historyRef.current;
+    if (!history || history.projectId !== project.id) {
+      if (history?.timer) window.clearTimeout(history.timer);
+      historyRef.current = { projectId: project.id, past: [], present: project, future: [], pendingBefore: null, timer: null };
+      setHistoryRevision((revision) => revision + 1);
+      return;
+    }
+    if (history.present === project) return;
+    if (!history.pendingBefore) {
+      history.pendingBefore = history.present;
+      history.future = [];
+    }
+    history.present = project;
+    if (history.timer) window.clearTimeout(history.timer);
+    history.timer = window.setTimeout(() => {
+      const active = historyRef.current;
+      if (!active?.pendingBefore) return;
+      active.past.push(active.pendingBefore);
+      if (active.past.length > 100) active.past.shift();
+      active.pendingBefore = null;
+      active.future = [];
+      active.timer = null;
+      setHistoryRevision((revision) => revision + 1);
+    }, 300);
   }, [project]);
+
+  /** Flushes the active debounce group into the undo history. */
+  const flushPendingHistory = () => {
+    const history = historyRef.current;
+    if (!history?.pendingBefore) return;
+    if (history.timer) window.clearTimeout(history.timer);
+    history.past.push(history.pendingBefore);
+    if (history.past.length > 100) history.past.shift();
+    history.pendingBefore = null;
+    history.timer = null;
+    setHistoryRevision((revision) => revision + 1);
+  };
+
+  /** Restores the last saved project state and moves the current state to redo. */
+  const undoProject = () => {
+    flushPendingHistory();
+    const history = historyRef.current;
+    const previous = history?.past.pop();
+    if (!history || !previous) return;
+    history.future.push(history.present);
+    history.present = previous;
+    setProject(previous);
+    setSelectedClipId(null);
+    setSelectedClipIds([]);
+    setHistoryRevision((revision) => revision + 1);
+  };
+
+  /** Restores the next project state from the redo history. */
+  const redoProject = () => {
+    const history = historyRef.current;
+    const next = history?.future.pop();
+    if (!history || !next) return;
+    history.past.push(history.present);
+    history.present = next;
+    setProject(next);
+    setSelectedClipId(null);
+    setSelectedClipIds([]);
+    setHistoryRevision((revision) => revision + 1);
+  };
+
+  /** Clears any pending history timer when the editor unmounts. */
+  useEffect(() => () => {
+    const timer = historyRef.current?.timer;
+    if (timer) window.clearTimeout(timer);
+  }, []);
 
   /** Keeps the browser media elements loaded at the active clip and source time. */
   useEffect(() => {
@@ -580,6 +648,7 @@ export default function Editor() {
     setSelectedClipId(null);
     setSelectedClipIds([]);
     setProject(stored);
+    restoreTimelineView(stored.timelineView);
     localStorage.setItem(PROJECT_KEY, id);
     setShowProjects(false);
   }, []);
@@ -591,6 +660,7 @@ export default function Editor() {
     timeRef.current = 0;
     setCurrentTime(0);
     setProject(fresh);
+    restoreTimelineView(fresh.timelineView);
     setSelectedClipId(null);
     setSelectedClipIds([]);
     localStorage.setItem(PROJECT_KEY, fresh.id);
@@ -606,14 +676,15 @@ export default function Editor() {
   /** Serializes project media into a portable JSON project download. */
   const exportProjectFile = useCallback(async () => {
     const assets = await Promise.all(project.assets.map(async ({ blob, ...asset }) => ({ ...asset, blobData: blob ? await blobToDataUrl(blob) : undefined })));
-    const archive = new Blob([JSON.stringify({ format: 'neupcut-project', version: 1, project: { ...project, assets } })], { type: 'application/json' });
+    const timelineView = { zoom, scrollLeft: timelineScrollRef.current?.scrollLeft ?? timelineScrollLeft };
+    const archive = new Blob([JSON.stringify({ format: 'neupcut-project', version: 1, project: { ...project, assets, timelineView } })], { type: 'application/json' });
     const archiveUrl = URL.createObjectURL(archive);
     const link = document.createElement('a');
     link.href = archiveUrl;
     link.download = `${project.name.replace(/[^a-z0-9-]+/gi, '-').toLowerCase() || 'project'}.neupcut.json`;
     link.click();
     URL.revokeObjectURL(archiveUrl);
-  }, [project]);
+  }, [project, timelineScrollLeft, zoom]);
 
   /** Imports a portable project JSON file and restores its embedded media. */
   const importProjectFile = useCallback(async (file?: File) => {
@@ -623,6 +694,7 @@ export default function Editor() {
       if (archive.format !== 'neupcut-project' || archive.version !== 1 || !archive.project?.id || !Array.isArray(archive.project.assets) || !Array.isArray(archive.project.clips)) throw new Error('That file is not a supported Neup Cut project.');
       const restored: EditorProject = { ...archive.project, assets: archive.project.assets.map(({ blobData, ...asset }) => ({ ...asset, blob: blobData ? dataUrlToBlob(blobData) : undefined })) };
       setProject(restored);
+      restoreTimelineView(restored.timelineView);
       setSelectedClipId(null);
       setSelectedClipIds([]);
       timeRef.current = 0;
@@ -645,6 +717,32 @@ export default function Editor() {
     setSelectedClipId(null);
     setSelectedClipIds([]);
   }, [selectedClipId, selectedClipIds]);
+
+  /** Deletes the current timeline selection when Backspace or Delete is pressed. */
+  useEffect(() => {
+    const handleEditorShortcut = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+      const command = event.metaKey || event.ctrlKey;
+      if (command && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) redoProject();
+        else undoProject();
+        return;
+      }
+      if (command && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redoProject();
+        return;
+      }
+      if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+      if (!selectedClipIds.length && !selectedClipId) return;
+      event.preventDefault();
+      removeSelectedClip();
+    };
+    window.addEventListener('keydown', handleEditorShortcut);
+    return () => window.removeEventListener('keydown', handleEditorShortcut);
+  }, [redoProject, removeSelectedClip, selectedClipId, selectedClipIds.length, undoProject]);
 
   /** Starts moving or trimming a clip based on the pointer target. */
   const beginClipDrag = (event: ReactPointerEvent<HTMLElement>, clip: TimelineClip, mode: DragState['mode']) => {
@@ -746,25 +844,34 @@ export default function Editor() {
 
   return (
     <main className="editor-shell">
-      <header className="topbar">
-        <div className="brand"><div className="brand-mark"><Clapperboard size={18} /></div><span>neup<span className="brand-light">cut</span></span><span className="beta">EDITOR</span></div>
-        <div className="project-name"><input aria-label="Project name" value={project.name} onChange={(event) => setProject((current) => ({ ...current, name: event.target.value }))} /><span className={`save-indicator ${saving}`} />{saving === 'saved' ? 'Saved locally' : saving === 'saving' ? 'Saving…' : 'Save failed'}</div>
-        <div className="top-actions"><button className="top-action" onClick={newProject}><FilePlus2 size={15} /> New</button><button className="top-action" onClick={() => void showProjectPicker()}><FolderOpen size={15} /> Open</button><button className="icon-button" aria-label="Save project" title="Save project now" onClick={() => { setSaving('saving'); void saveProject({ ...project, updatedAt: Date.now() }).then(() => setSaving('saved')).catch(() => setSaving('error')); }}><Save size={16} /></button><button className="share-button" onClick={exportVideo} disabled={exporting || duration === 0}><Download size={15} /> {exporting ? 'Exporting…' : 'Export video'}</button></div>
-      </header>
+      <EditorHeader
+        projectName={project.name}
+        saving={saving}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        exporting={exporting}
+        canExport={duration > 0}
+        onNameChange={(name) => setProject((current) => ({ ...current, name }))}
+        onUndo={undoProject}
+        onRedo={redoProject}
+        onNew={newProject}
+        onOpen={() => void showProjectPicker()}
+        onSave={saveNow}
+        onExport={exportVideo}
+      />
 
       <section className="workspace">
         <aside className="left-rail"><button className="rail-item active"><Film size={18} /><span>Media</span></button><button className="rail-item" onClick={addTitle}><Type size={18} /><span>Text</span></button><button className="rail-item" onClick={addTitle}><Plus size={18} /><span>Title</span></button><button className="rail-item" onClick={() => fileInputRef.current?.click()}><AudioLines size={18} /><span>Audio</span></button></aside>
 
-        <aside className="media-panel">
-          <div className="panel-heading"><div><h2>Project media</h2><p>Stored in this browser</p></div><button className="small-icon-button" aria-label="Import media" onClick={() => fileInputRef.current?.click()}><Plus size={17} /></button></div>
-          <button className="import-card" onClick={() => fileInputRef.current?.click()}><div className="upload-icon"><Upload size={18} /></div><strong>Import media</strong><span>Video, audio, or images</span></button>
-          <input ref={fileInputRef} type="file" accept="video/*,audio/*,image/*" multiple hidden onChange={(event) => { if (event.target.files) void importFiles(event.target.files); event.currentTarget.value = ''; }} />
-          <input ref={projectInputRef} type="file" accept=".json,.neupcut.json,application/json" hidden onChange={(event) => { void importProjectFile(event.target.files?.[0]); event.currentTarget.value = ''; }} />
-          <div className="asset-heading"><span>ASSETS</span><span>{project.assets.length} items</span></div>
-          <div className="asset-list">{project.assets.map((asset) => <div className="asset-row" key={asset.id}><span className={`asset-thumb ${asset.kind}`}>{asset.kind === 'video' ? <Video size={16} /> : asset.kind === 'audio' ? <Music2 size={16} /> : asset.kind === 'title' ? <Type size={16} /> : <ImagePlus size={16} />}</span><span className="asset-copy"><strong>{asset.name}</strong><small>{asset.kind === 'title' ? 'Title card' : `${asset.kind} · ${formatTime(asset.duration)}`}</small></span><button className="asset-add" title="Add to timeline at playhead" onClick={() => addAssetToTimeline(asset)}><Plus size={14} /></button></div>)}{!project.assets.length && <div className="empty-assets">Import media or add a title to start editing.</div>}</div>
-          {mediaError && <div className="media-error">{mediaError}</div>}
-          <div className="panel-tip"><Settings2 size={15} /><span>Projects and media autosave locally in this browser.</span></div>
-        </aside>
+        <MediaPanel
+          assets={project.assets}
+          mediaError={mediaError}
+          fileInputRef={fileInputRef}
+          projectInputRef={projectInputRef}
+          onImportFiles={(files) => void importFiles(files)}
+          onImportProject={(file) => void importProjectFile(file)}
+          onAddAsset={addAssetToTimeline}
+        />
 
         <section className="preview-area">
           <div className="preview-header"><div className="preview-label"><span className="live-dot" /> CANVAS PREVIEW</div><div className="preview-resolution"><button className="viewer-zoom-step" aria-label="Zoom viewer out" title="Zoom out" onClick={() => adjustViewerZoom(-0.1)}><ZoomOut size={13} /></button><button className="viewer-zoom-reset" title="Reset viewer zoom" onClick={() => { setViewerZoom(1); setViewerPan({ x: 0, y: 0 }); }}>{Math.round(viewerZoom * 100)}%</button><button className="viewer-zoom-step" aria-label="Zoom viewer in" title="Zoom in" onClick={() => adjustViewerZoom(0.1)}><ZoomIn size={13} /></button> 1280 × 720 <span>·</span> {formatTime(currentTime)}</div></div>
@@ -779,7 +886,7 @@ export default function Editor() {
         <div className="timeline-toolbar"><div className="timeline-tools"><button className="tool-button selected" title="Drag over empty track space to select clips; drag a clip to move it"><span className="cursor-icon">↖</span></button><button className="tool-button" title="Split clip at playhead" onClick={() => { const clip = project.clips.find((item) => item.track === 'video' && currentTime > item.start && currentTime < item.start + item.duration); if (!clip) return; const firstDuration = currentTime - clip.start; const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: currentTime, sourceStart: clip.sourceStart + firstDuration, duration: clip.duration - firstDuration }; setProject((current) => ({ ...current, clips: [...current.clips.map((item) => item.id === clip.id ? { ...item, duration: firstDuration } : item), second] })); setSelectedClipId(second.id); setSelectedClipIds([second.id]); }}><Scissors size={15} /></button><span className="toolbar-separator" /><button className="tool-button" onClick={addTitle} title="Add title"><Type size={15} /></button><button className="tool-button" onClick={removeSelectedClip} title="Delete selected clip"><Trash2 size={15} /></button></div><div className="timeline-center">Timeline <span className="timeline-duration">{formatTime(duration)}</span></div><div className="zoom-control"><button className="tool-button" aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))}><ZoomOut size={15} /></button><input type="range" min="0.5" max="10" step="0.1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} aria-label={`Timeline zoom ${zoom.toFixed(1)} times`} /><span className="zoom-level">{zoom.toFixed(1)}×</span><button className="tool-button" aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(10, value + 0.15))}><ZoomIn size={15} /></button></div></div>
         <div className="timeline-body">
           <div className="track-labels"><div className="ruler-spacer" /><div className="track-label"><Video size={15} /><span>Video 1</span><span className="track-menu">···</span></div><div className="track-label"><Music2 size={15} /><span>Audio 1</span><span className="track-menu">···</span></div></div>
-          <div ref={timelineScrollRef} className="timeline-scroll" onPointerDownCapture={beginTimelineSelection} onPointerMoveCapture={updateTimelineSelection} onPointerUpCapture={(event) => finishTimelineSelection(event, true)} onPointerCancelCapture={(event) => finishTimelineSelection(event, false)}>
+          <div ref={timelineScrollRef} className="timeline-scroll" onScroll={(event) => setTimelineScrollLeft(event.currentTarget.scrollLeft)} onPointerDownCapture={beginTimelineSelection} onPointerMoveCapture={updateTimelineSelection} onPointerUpCapture={(event) => finishTimelineSelection(event, true)} onPointerCancelCapture={(event) => finishTimelineSelection(event, false)}>
             <div className="timeline-inner" style={{ width: timelineWidth }} onPointerDown={(event) => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('ruler')) { const bounds = event.currentTarget.getBoundingClientRect(); seekTo(Math.max(0, (event.clientX - bounds.left) / (PIXELS_PER_SECOND * zoom))); } }}>
               <div className="ruler">{Array.from({ length: Math.ceil(duration / 5) + 3 }, (_, index) => <button className="ruler-tick" key={index} style={{ left: `${index * 5 * PIXELS_PER_SECOND * zoom}px` }} onClick={() => seekTo(index * 5)}>{`00:${String(index * 5).padStart(2, '0')}`}</button>)}</div>
               {(['video', 'audio'] as const).map((track) => <div key={track} className={`track-lane ${track}-lane`} onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>
@@ -803,24 +910,4 @@ export default function Editor() {
       {showProjects && <div className="modal-backdrop" onClick={() => setShowProjects(false)}><section className="project-modal" onClick={(event) => event.stopPropagation()}><header><div><h2>Open a project</h2><p>Open a local project or import a portable project file.</p></div><button className="small-icon-button" onClick={() => setShowProjects(false)}>×</button></header><div className="project-modal-actions"><button className="new-project-row" onClick={() => { newProject(); setShowProjects(false); }}><FilePlus2 size={17} /> Create a new project</button><button className="new-project-row" onClick={() => projectInputRef.current?.click()}><Upload size={16} /> Import project file</button><button className="new-project-row" onClick={() => void exportProjectFile()}><Download size={16} /> Download project file</button></div>{projectList.map((item) => <div className="project-row" key={item.id}><button onClick={() => void openProject(item.id)}><Clapperboard size={16} /><span><strong>{item.name}</strong><small>Edited {new Date(item.updatedAt).toLocaleString()}</small></span></button>{item.id !== project.id && <button className="project-delete" title="Delete project" onClick={() => { void deleteProject(item.id).then(() => void showProjectPicker()); }}><Trash2 size={14} /></button>}</div>)}</section></div>}
     </main>
   );
-}
-
-/** Reads a media blob as a data URL for the portable project file. */
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Could not package project media.'));
-    reader.onerror = () => reject(reader.error ?? new Error('Could not package project media.'));
-    reader.readAsDataURL(blob);
-  });
-}
-
-/** Restores a project media blob from its portable data URL. */
-function dataUrlToBlob(dataUrl: string): Blob {
-  const [metadata, encoded] = dataUrl.split(',', 2);
-  const mimeType = metadata.match(/^data:([^;]+)/)?.[1] ?? 'application/octet-stream';
-  const binary = atob(encoded);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  return new Blob([bytes], { type: mimeType });
 }

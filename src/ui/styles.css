@@ -106,6 +106,8 @@ button { color: inherit; }
 .top-actions { gap: 8px; }
 .top-action { display: flex; align-items: center; gap: 6px; padding: 7px 8px; border: 1px solid #303037; border-radius: 5px; background: #1b1c20; color: #b6b2be; font-size: 10px; cursor: pointer; }
 .top-action:hover { background: #29272f; color: white; }
+.top-action:disabled { opacity: .38; cursor: default; }.top-action:disabled:hover { background: #1b1c20; color: #b6b2be; }
+.history-action { min-width: 61px; justify-content: center; }
 .share-button:disabled { opacity: .55; cursor: wait; }
 .asset-thumb.image { color: #e2bc7b; background: #443a28; }.asset-thumb.title { color: #c4a4f4; background: #382c4e; }
 .asset-add { width: 23px; height: 23px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: #8d8995; cursor: pointer; }
