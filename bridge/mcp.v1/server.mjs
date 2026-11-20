@@ -1,4 +1,4 @@
-import { readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createServer as createHttpServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -8,10 +8,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
+import { editProject, getProject, listProjects } from '../../services/projects.mjs';
 
-const serverDirectory = path.dirname(fileURLToPath(import.meta.url));
-const defaultProjectsDirectory = path.resolve(serverDirectory, '../../projects');
-const projectsDirectory = path.resolve(process.env.NEUPCUT_PROJECTS_DIR || defaultProjectsDirectory);
 const mediaDirectory = path.resolve(process.env.NEUPCUT_MEDIA_DIR || path.resolve(process.cwd(), 'media'));
 
 /** Creates a Streamable HTTP request handler for mounting at the editor origin. */
@@ -125,24 +123,6 @@ function escapeDrawtext(value) {
   return value.replaceAll('\\', '\\\\').replaceAll(':', '\\:').replaceAll("'", "\\'").replaceAll('%', '\\%').replaceAll(',', '\\,').replaceAll('[', '\\[').replaceAll(']', '\\]').replaceAll(';', '\\;').replaceAll('\n', ' ');
 }
 
-/** Resolves a project path while ensuring it stays inside the configured project directory. */
-function resolveProjectPath(fileName) {
-  const resolvedPath = path.resolve(projectsDirectory, fileName);
-  if (!resolvedPath.startsWith(`${projectsDirectory}${path.sep}`)) throw new Error('Project path must stay inside the configured projects directory.');
-  if (!resolvedPath.endsWith('.neupcut.json')) throw new Error('Project files must use the .neupcut.json extension.');
-  return resolvedPath;
-}
-
-/** Reads and validates a portable Neup Cut project file. */
-async function readProject(fileName) {
-  const filePath = resolveProjectPath(fileName);
-  const parsed = JSON.parse(await readFile(filePath, 'utf8'));
-  if (parsed.format !== 'neupcut-project' || parsed.version !== 1 || !parsed.project?.id || !Array.isArray(parsed.project.assets) || !Array.isArray(parsed.project.clips)) {
-    throw new Error('Unsupported or invalid Neup Cut project file.');
-  }
-  return { filePath, archive: parsed, project: parsed.project };
-}
-
 /** Converts thrown errors into the standard MCP text result. */
 function errorResult(error) {
   return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] };
@@ -158,34 +138,27 @@ function summarizeProject(project) {
   };
 }
 
-/** Writes an edited project to a new file unless the caller explicitly chooses an output filename. */
-async function writeProject(archive, project, outputFile) {
-  const destinationName = outputFile || `${path.basename(archive.project.name || 'project').replace(/[^a-z0-9-]+/gi, '-').toLowerCase() || 'project'}.edited.neupcut.json`;
-  const destinationPath = resolveProjectPath(destinationName);
-  await writeFile(destinationPath, JSON.stringify({ ...archive, project: { ...project, updatedAt: Date.now() } }, null, 2), { flag: 'wx' });
-  return destinationName;
-}
-
 /** Creates an MCP server instance with the editor's project and media tools registered. */
 function createMcpServer() {
   const server = new McpServer({ name: 'neup-cut-video-editor', version: '1.0.0' });
 
   server.registerTool('list_projects', {
-    description: 'List portable .neupcut.json project files in the configured projects directory.',
+    description: 'List projects saved in the editor database.',
     inputSchema: {},
   }, async () => {
-    try {
-      const entries = await readdir(projectsDirectory, { withFileTypes: true }).catch((error) => error.code === 'ENOENT' ? [] : Promise.reject(error));
-      const files = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.neupcut.json')).map((entry) => entry.name);
-      return { content: [{ type: 'text', text: JSON.stringify({ directory: projectsDirectory, projects: files }, null, 2) }] };
-    } catch (error) { return errorResult(error); }
+    try { return { content: [{ type: 'text', text: JSON.stringify({ projects: await listProjects() }, null, 2) }] }; }
+    catch (error) { return errorResult(error); }
   });
 
   server.registerTool('get_project', {
-    description: 'Inspect a portable Neup Cut project, including its assets and timeline clips.',
-    inputSchema: { file: z.string().min(1).describe('Project filename inside the configured projects directory.') },
-  }, async ({ file }) => {
-    try { const { project } = await readProject(file); return { content: [{ type: 'text', text: JSON.stringify(summarizeProject(project), null, 2) }] }; }
+    description: 'Inspect a database project, including its assets and timeline clips.',
+    inputSchema: { projectId: z.string().uuid().describe('Project UUID returned by list_projects.') },
+  }, async ({ projectId }) => {
+    try {
+      const project = await getProject(projectId);
+      if (!project) throw new Error(`Project not found: ${projectId}`);
+      return { content: [{ type: 'text', text: JSON.stringify(summarizeProject(project), null, 2) }] };
+    }
     catch (error) { return errorResult(error); }
   });
 
@@ -263,84 +236,83 @@ function createMcpServer() {
   });
 
   server.registerTool('add_clip', {
-    description: 'Add a timeline clip using an existing project asset and save the edited project as a new file.',
+    description: 'Add a timeline clip using an existing asset in a database project.',
     inputSchema: {
-      file: z.string().min(1), assetId: z.string().min(1), start: z.number().nonnegative(),
-      duration: z.number().positive().optional(), trackIndex: z.number().int().nonnegative().optional(), outputFile: z.string().optional(),
+      projectId: z.string().uuid(), assetId: z.string().min(1), start: z.number().nonnegative(),
+      duration: z.number().positive().optional(), trackIndex: z.number().int().nonnegative().optional(),
     },
-  }, async ({ file, assetId, start, duration, trackIndex, outputFile }) => {
+  }, async ({ projectId, assetId, start, duration, trackIndex }) => {
     try {
-      const { archive, project } = await readProject(file);
-      const asset = project.assets.find((item) => item.id === assetId);
-      if (!asset) throw new Error(`Asset not found: ${assetId}`);
-      const clipDuration = duration ?? asset.duration;
-      if (!Number.isFinite(clipDuration) || clipDuration <= 0) throw new Error('Clip duration must be a positive number.');
-      const clip = {
-        id: crypto.randomUUID(), assetId: asset.id, name: asset.name,
-        track: asset.kind === 'audio' ? 'audio' : 'video', trackIndex: trackIndex ?? 0,
-        start, duration: clipDuration, sourceStart: 0,
-      };
-      const updatedProject = { ...project, clips: [...project.clips, clip] };
-      const savedAs = await writeProject(archive, updatedProject, outputFile);
-      return { content: [{ type: 'text', text: JSON.stringify({ clip, savedAs }, null, 2) }] };
+      let clip;
+      const result = await editProject(projectId, (project) => {
+        const asset = project.assets.find((item) => item.id === assetId);
+        if (!asset) throw new Error(`Asset not found: ${assetId}`);
+        const clipDuration = duration ?? asset.duration;
+        if (!Number.isFinite(clipDuration) || clipDuration <= 0) throw new Error('Clip duration must be a positive number.');
+        clip = { id: randomUUID(), assetId: asset.id, name: asset.name, track: asset.kind === 'audio' ? 'audio' : 'video', trackIndex: trackIndex ?? 0, start, duration: clipDuration, sourceStart: 0 };
+        return { ...project, clips: [...project.clips, clip] };
+      });
+      return { content: [{ type: 'text', text: JSON.stringify({ projectId, clip, updatedAt: result.updatedAt }, null, 2) }] };
     } catch (error) { return errorResult(error); }
   });
 
   server.registerTool('update_clip', {
-    description: 'Move or trim a timeline clip and save the edited project as a new file.',
+    description: 'Move or trim a timeline clip in a database project.',
     inputSchema: {
-      file: z.string().min(1), clipId: z.string().min(1), start: z.number().nonnegative().optional(),
+      projectId: z.string().uuid(), clipId: z.string().min(1), start: z.number().nonnegative().optional(),
       duration: z.number().positive().optional(), sourceStart: z.number().nonnegative().optional(),
       track: z.enum(['video', 'audio']).optional(), trackIndex: z.number().int().nonnegative().optional(),
-      muted: z.boolean().optional(), outputFile: z.string().optional(),
+      muted: z.boolean().optional(),
     },
-  }, async ({ file, clipId, outputFile, ...changes }) => {
+  }, async ({ projectId, clipId, ...changes }) => {
     try {
-      const { archive, project } = await readProject(file);
-      if (!project.clips.some((clip) => clip.id === clipId)) throw new Error(`Clip not found: ${clipId}`);
-      const updatedProject = { ...project, clips: project.clips.map((clip) => clip.id === clipId ? { ...clip, ...changes } : clip) };
-      const savedAs = await writeProject(archive, updatedProject, outputFile);
-      return { content: [{ type: 'text', text: JSON.stringify({ clip: updatedProject.clips.find((clip) => clip.id === clipId), savedAs }, null, 2) }] };
+      const result = await editProject(projectId, (project) => {
+        if (!project.clips.some((clip) => clip.id === clipId)) throw new Error(`Clip not found: ${clipId}`);
+        return { ...project, clips: project.clips.map((clip) => clip.id === clipId ? { ...clip, ...changes } : clip) };
+      });
+      return { content: [{ type: 'text', text: JSON.stringify({ projectId, clip: result.project.clips.find((clip) => clip.id === clipId), updatedAt: result.updatedAt }, null, 2) }] };
     } catch (error) { return errorResult(error); }
   });
 
   server.registerTool('delete_clip', {
-    description: 'Delete a timeline clip and save the edited project as a new file.',
-    inputSchema: { file: z.string().min(1), clipId: z.string().min(1), outputFile: z.string().optional() },
-  }, async ({ file, clipId, outputFile }) => {
+    description: 'Delete a timeline clip from a database project.',
+    inputSchema: { projectId: z.string().uuid(), clipId: z.string().min(1) },
+  }, async ({ projectId, clipId }) => {
     try {
-      const { archive, project } = await readProject(file);
-      const clips = project.clips.filter((clip) => clip.id !== clipId);
-      if (clips.length === project.clips.length) throw new Error(`Clip not found: ${clipId}`);
-      const savedAs = await writeProject(archive, { ...project, clips }, outputFile);
-      return { content: [{ type: 'text', text: JSON.stringify({ deletedClipId: clipId, savedAs }, null, 2) }] };
+      const result = await editProject(projectId, (project) => {
+        const clips = project.clips.filter((clip) => clip.id !== clipId);
+        if (clips.length === project.clips.length) throw new Error(`Clip not found: ${clipId}`);
+        return { ...project, clips };
+      });
+      return { content: [{ type: 'text', text: JSON.stringify({ projectId, deletedClipId: clipId, updatedAt: result.updatedAt }, null, 2) }] };
     } catch (error) { return errorResult(error); }
   });
 
   server.registerTool('set_clip_look', {
-    description: 'Set a clip animation and/or visual effect, replacing effects of the same preset, then save as a new project file.',
+    description: 'Set a clip animation and/or visual effect in a database project.',
     inputSchema: {
-      file: z.string().min(1), clipId: z.string().min(1), outputFile: z.string().optional(),
+      projectId: z.string().uuid(), clipId: z.string().min(1),
       effectPresetId: z.string().optional(), effectAmount: z.number().min(0).max(1).optional(),
       animationPresetId: z.string().optional(), animationDuration: z.number().positive().optional(),
     },
-  }, async ({ file, clipId, outputFile, effectPresetId, effectAmount, animationPresetId, animationDuration }) => {
+  }, async ({ projectId, clipId, effectPresetId, effectAmount, animationPresetId, animationDuration }) => {
     try {
-      const { archive, project } = await readProject(file);
-      const existingClip = project.clips.find((clip) => clip.id === clipId);
-      if (!existingClip) throw new Error(`Clip not found: ${clipId}`);
-      let updatedClip = { ...existingClip };
-      if (effectPresetId) {
-        if (effectAmount === undefined) throw new Error('effectAmount is required with effectPresetId.');
-        updatedClip = { ...updatedClip, effects: [...(updatedClip.effects ?? []).filter((effect) => effect.presetId !== effectPresetId), { presetId: effectPresetId, amount: effectAmount }] };
-      }
-      if (animationPresetId) {
-        if (animationDuration === undefined) throw new Error('animationDuration is required with animationPresetId.');
-        updatedClip = { ...updatedClip, animation: { presetId: animationPresetId, duration: animationDuration } };
-      }
-      const updatedProject = { ...project, clips: project.clips.map((clip) => clip.id === clipId ? updatedClip : clip) };
-      const savedAs = await writeProject(archive, updatedProject, outputFile);
-      return { content: [{ type: 'text', text: JSON.stringify({ clip: updatedClip, savedAs }, null, 2) }] };
+      let updatedClip;
+      const result = await editProject(projectId, (project) => {
+        const existingClip = project.clips.find((clip) => clip.id === clipId);
+        if (!existingClip) throw new Error(`Clip not found: ${clipId}`);
+        updatedClip = { ...existingClip };
+        if (effectPresetId) {
+          if (effectAmount === undefined) throw new Error('effectAmount is required with effectPresetId.');
+          updatedClip = { ...updatedClip, effects: [...(updatedClip.effects ?? []).filter((effect) => effect.presetId !== effectPresetId), { presetId: effectPresetId, amount: effectAmount }] };
+        }
+        if (animationPresetId) {
+          if (animationDuration === undefined) throw new Error('animationDuration is required with animationPresetId.');
+          updatedClip = { ...updatedClip, animation: { presetId: animationPresetId, duration: animationDuration } };
+        }
+        return { ...project, clips: project.clips.map((clip) => clip.id === clipId ? updatedClip : clip) };
+      });
+      return { content: [{ type: 'text', text: JSON.stringify({ projectId, clip: updatedClip, updatedAt: result.updatedAt }, null, 2) }] };
     } catch (error) { return errorResult(error); }
   });
 

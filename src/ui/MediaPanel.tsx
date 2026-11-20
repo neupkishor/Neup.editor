@@ -61,7 +61,7 @@ export default function MediaPanel({ assets, mediaError, fileInputRef, projectIn
 
   return (
     <aside className="media-panel">
-      <div className="panel-heading"><div><h2>Project media</h2><p>Stored in this browser</p></div><button className="small-icon-button" aria-label="Import media" onClick={openMediaPicker}><Plus size={17} /></button></div>
+      <div className="panel-heading"><div><h2>Project media</h2><p>Stored with this project</p></div><button className="small-icon-button" aria-label="Import media" onClick={openMediaPicker}><Plus size={17} /></button></div>
       <button className="import-card" onClick={openMediaPicker}><div className="upload-icon"><Upload size={18} /></div><strong>Import media</strong><span>Video, audio, or images</span></button>
       <input ref={fileInputRef} type="file" accept="video/*,audio/*,image/*" multiple hidden onChange={(event) => { if (event.target.files) onImportFiles(event.target.files); event.currentTarget.value = ''; }} />
       <input ref={projectInputRef} type="file" accept=".json,.neupcut.json,application/json" hidden onChange={(event) => { onImportProject(event.target.files?.[0]); event.currentTarget.value = ''; }} />
@@ -70,7 +70,7 @@ export default function MediaPanel({ assets, mediaError, fileInputRef, projectIn
       {contextMenu && <div className="timeline-context-menu media-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }} onContextMenu={(event) => event.preventDefault()}><button role="menuitem" onClick={() => { onAddAsset(contextMenu.asset); setContextMenu(null); }}><Plus size={14} /> Add to timeline</button><button role="menuitem" onClick={() => requestAssetDelete(contextMenu.asset)}><Trash2 size={14} /> Delete media</button></div>}
       {deleteConfirmation && <div className="modal-backdrop media-delete-backdrop"><section className="media-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="media-delete-title"><div className="media-delete-icon"><Trash2 size={18} /></div><h2 id="media-delete-title">Media is used on the timeline</h2><p><strong>{deleteConfirmation.name}</strong> is used by {usedAssetIds.has(deleteConfirmation.id) ? 'one or more clips' : 'a timeline clip'}. Deleting it will also remove those clips.</p><p className="delete-countdown">{deleteWait > 0 ? `Please wait ${deleteWait} seconds…` : 'You can now confirm deletion.'}</p><div className="media-delete-actions"><button onClick={() => setDeleteConfirmation(null)}>Cancel</button><button className="confirm-media-delete" disabled={deleteWait > 0} onClick={() => { onDeleteAsset(deleteConfirmation.id); setDeleteConfirmation(null); }}>Delete media and clips</button></div></section></div>}
       {mediaError && <div className="media-error">{mediaError}</div>}
-      <div className="panel-tip"><Settings2 size={15} /><span>Projects and media autosave locally in this browser.</span></div>
+      <div className="panel-tip"><Settings2 size={15} /><span>Projects autosave to the server database.</span></div>
     </aside>
   );
 }

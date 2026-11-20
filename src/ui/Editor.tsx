@@ -11,7 +11,6 @@ import MediaPanel from './MediaPanel';
 import AnimationLibraryPanel from './AnimationLibraryPanel';
 import EffectsLibraryPanel from './EffectsLibraryPanel';
 
-const PROJECT_KEY = 'neupcut-current-project';
 const PIXELS_PER_SECOND = 12;
 const FRAME_RATE = 30;
 
@@ -75,9 +74,18 @@ function normalizeProjectTracks(project: EditorProject): EditorProject {
   };
 }
 
-/** Provides a working browser based video editor with local projects and export. */
+/** Replaces the browser URL with the current project's editor route. */
+function setEditorProjectRoute(projectId: string): void {
+  const url = new URL(window.location.href);
+  url.pathname = '/editor';
+  url.searchParams.set('project', projectId);
+  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
+/** Provides the video editor at /editor with projects selected through the URL. */
 export default function Editor() {
   const [project, setProject] = useState<EditorProject>(() => createProject());
+  const [projectReady, setProjectReady] = useState(false);
   const [, setHistoryRevision] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -135,6 +143,7 @@ export default function Editor() {
   const currentExportTimeRef = useRef(0);
   const exportingRef = useRef(false);
   const historyRef = useRef<ProjectHistory | null>(null);
+  const initialProjectRef = useRef<Promise<EditorProject | undefined> | null>(null);
   const canUndo = Boolean(historyRef.current?.past.length || historyRef.current?.pendingBefore);
   const canRedo = Boolean(historyRef.current?.future.length);
   const exportFormatOptions: Array<{ value: ExportFormat; label: string }> = [
@@ -204,7 +213,10 @@ export default function Editor() {
   const saveNow = () => {
     setSaving('saving');
     const updated = { ...project, updatedAt: Date.now(), timelineView: { zoom, scrollLeft: timelineScrollRef.current?.scrollLeft ?? timelineScrollLeft } };
-    void saveProject(updated).then(() => setSaving('saved')).catch(() => setSaving('error'));
+    void saveProject(updated).then(() => {
+      setEditorProjectRoute(updated.id);
+      setSaving('saved');
+    }).catch(() => setSaving('error'));
   };
 
   /** Restores timeline zoom and horizontal position from the saved project. */
@@ -528,12 +540,15 @@ export default function Editor() {
     return () => { for (const url of assetUrls.values()) URL.revokeObjectURL(url); };
   }, [assetUrls]);
 
-  /** Restores the last opened project or creates and saves a blank one. */
+  /** Loads the requested project or creates a fresh one when /editor has no project query. */
   useEffect(() => {
     let cancelled = false;
+    if (!initialProjectRef.current) {
+      const projectId = new URLSearchParams(window.location.search).get('project');
+      initialProjectRef.current = projectId ? loadProject(projectId).catch(() => undefined) : Promise.resolve(undefined);
+    }
     const restore = async () => {
-      const projectId = localStorage.getItem(PROJECT_KEY);
-      const stored = projectId ? await loadProject(projectId).catch(() => undefined) : undefined;
+      const stored = await initialProjectRef.current;
       if (cancelled) return;
       if (stored) {
         setProject(normalizeProjectTracks(stored));
@@ -542,9 +557,10 @@ export default function Editor() {
       else {
         const blank = createProject();
         setProject(blank);
-        localStorage.setItem(PROJECT_KEY, blank.id);
+        setEditorProjectRoute(blank.id);
         await saveProject(blank).catch(() => undefined);
       }
+      setProjectReady(true);
     };
     void restore();
     return () => { cancelled = true; };
@@ -552,16 +568,17 @@ export default function Editor() {
 
   /** Saves project edits automatically and updates the saved indicator. */
   useEffect(() => {
+    if (!projectReady) return;
     setSaving('saving');
     const timer = window.setTimeout(() => {
       const updated = { ...project, updatedAt: Date.now(), timelineView: { zoom, scrollLeft: timelineScrollRef.current?.scrollLeft ?? timelineScrollLeft } };
       void saveProject(updated).then(() => {
+        setEditorProjectRoute(updated.id);
         setSaving('saved');
-        localStorage.setItem(PROJECT_KEY, project.id);
       }).catch(() => setSaving('error'));
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [project, zoom, timelineScrollLeft]);
+  }, [project, projectReady, zoom, timelineScrollLeft]);
 
   /** Records project edits as undo steps, grouping rapid changes such as clip drags. */
   useEffect(() => {
@@ -862,7 +879,7 @@ export default function Editor() {
     setPlaying((value) => !value);
   }, [currentTime, duration, playing, seekTo]);
 
-  /** Opens a saved project from local IndexedDB storage. */
+  /** Opens a saved project from the projects database. */
   const openProject = useCallback(async (id: string) => {
     const stored = await loadProject(id);
     if (!stored) return;
@@ -873,7 +890,7 @@ export default function Editor() {
     setSelectedClipIds([]);
     setProject(normalizeProjectTracks(stored));
     restoreTimelineView(stored.timelineView);
-    localStorage.setItem(PROJECT_KEY, id);
+    setEditorProjectRoute(stored.id);
     setShowProjects(false);
   }, []);
 
@@ -887,7 +904,7 @@ export default function Editor() {
     restoreTimelineView(fresh.timelineView);
     setSelectedClipId(null);
     setSelectedClipIds([]);
-    localStorage.setItem(PROJECT_KEY, fresh.id);
+    setEditorProjectRoute(fresh.id);
   }, []);
 
   /** Refreshes the saved project list before displaying the project picker. */
@@ -918,13 +935,13 @@ export default function Editor() {
       if (archive.format !== 'neupcut-project' || archive.version !== 1 || !archive.project?.id || !Array.isArray(archive.project.assets) || !Array.isArray(archive.project.clips)) throw new Error('That file is not a supported Neup Cut project.');
       const restored = normalizeProjectTracks({ ...archive.project, assets: archive.project.assets.map(({ blobData, ...asset }) => ({ ...asset, blob: blobData ? dataUrlToBlob(blobData) : undefined })) });
       setProject(restored);
+      setEditorProjectRoute(restored.id);
       restoreTimelineView(restored.timelineView);
       setSelectedClipId(null);
       setSelectedClipIds([]);
       timeRef.current = 0;
       setCurrentTime(0);
       setPlaying(false);
-      localStorage.setItem(PROJECT_KEY, restored.id);
       setMediaError('');
       setShowProjects(false);
     } catch (error) {
@@ -1389,7 +1406,7 @@ export default function Editor() {
 
       {showExportSettings && <div className="modal-backdrop" onClick={() => setShowExportSettings(false)}><section className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title" onClick={(event) => event.stopPropagation()}><header><div><h2 id="export-modal-title">Export video</h2><p>Render the complete timeline at your chosen size and format.</p></div><button className="small-icon-button" aria-label="Close export options" onClick={() => setShowExportSettings(false)}>×</button></header><label className="field-label">RESOLUTION<select value={exportResolution} onChange={(event) => setExportResolution(event.target.value as ExportResolution)}>{Object.entries(exportResolutions).map(([value, option]) => <option key={value} value={value}>{option.label} · {option.width} × {option.height}</option>)}</select></label><label className="field-label">FORMAT<select value={exportFormat} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>{exportFormatOptions.map((option) => { const supported = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(option.value); return <option key={option.value} value={option.value} disabled={!supported}>{option.label}{supported ? '' : ' · unavailable in this browser'}</option>; })}</select></label><p className="export-format-note">MP4 encoding depends on browser codec support. WebM is available in most browsers.</p>{mediaError && <div className="media-error">{mediaError}</div>}<div className="export-modal-actions"><button onClick={() => setShowExportSettings(false)}>Cancel</button><button className="share-button" disabled={exporting} onClick={() => void startVideoExport()}><Download size={14} /> Start export</button></div></section></div>}
 
-      {showProjects && <div className="modal-backdrop" onClick={() => setShowProjects(false)}><section className="project-modal" onClick={(event) => event.stopPropagation()}><header><div><h2>Open a project</h2><p>Open a local project or import a portable project file.</p></div><button className="small-icon-button" onClick={() => setShowProjects(false)}>×</button></header><div className="project-modal-actions"><button className="new-project-row" onClick={() => { newProject(); setShowProjects(false); }}><FilePlus2 size={17} /> Create a new project</button><button className="new-project-row" onClick={() => projectInputRef.current?.click()}><Upload size={16} /> Import project file</button><button className="new-project-row" onClick={() => void exportProjectFile()}><Download size={16} /> Download project file</button></div>{projectList.map((item) => <div className="project-row" key={item.id}><button onClick={() => void openProject(item.id)}><Clapperboard size={16} /><span><strong>{item.name}</strong><small>Edited {new Date(item.updatedAt).toLocaleString()}</small></span></button>{item.id !== project.id && <button className="project-delete" title="Delete project" onClick={() => { void deleteProject(item.id).then(() => void showProjectPicker()); }}><Trash2 size={14} /></button>}</div>)}</section></div>}
+      {showProjects && <div className="modal-backdrop" onClick={() => setShowProjects(false)}><section className="project-modal" onClick={(event) => event.stopPropagation()}><header><div><h2>Open a project</h2><p>Open a saved project or import a portable project file.</p></div><button className="small-icon-button" onClick={() => setShowProjects(false)}>×</button></header><div className="project-modal-actions"><button className="new-project-row" onClick={() => { newProject(); setShowProjects(false); }}><FilePlus2 size={17} /> Create a new project</button><button className="new-project-row" onClick={() => projectInputRef.current?.click()}><Upload size={16} /> Import project file</button><button className="new-project-row" onClick={() => void exportProjectFile()}><Download size={16} /> Download project file</button></div>{projectList.map((item) => <div className="project-row" key={item.id}><button onClick={() => void openProject(item.id)}><Clapperboard size={16} /><span><strong>{item.name}</strong><small>Edited {new Date(item.updatedAt).toLocaleString()}</small></span></button>{item.id !== project.id && <button className="project-delete" title="Delete project" onClick={() => { void deleteProject(item.id).then(() => void showProjectPicker()); }}><Trash2 size={14} /></button>}</div>)}</section></div>}
     </main>
   );
 }

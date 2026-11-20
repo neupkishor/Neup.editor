@@ -7,52 +7,11 @@ type StoredProject = Omit<EditorProject, 'assets'> & {
 };
 
 const uploadedMedia = new Map<string, Blob>();
-let legacyMigration: Promise<void> | undefined;
+const projectSaveQueues = new Map<string, Promise<void>>();
 
 /** Builds an unambiguous key for one project's uploaded media asset. */
 function getMediaKey(projectId: string, assetId: string): string {
   return `${projectId}:${assetId}`;
-}
-
-/** Reads saved projects from the editor's former browser-only database. */
-async function readLegacyProjects(): Promise<EditorProject[]> {
-  if (!('indexedDB' in globalThis)) return [];
-  if (indexedDB.databases) {
-    const databases = await indexedDB.databases();
-    if (!databases.some((database) => database.name === 'neupcut-editor')) return [];
-  }
-  return new Promise((resolve) => {
-    const request = indexedDB.open('neupcut-editor');
-    request.onupgradeneeded = (event) => {
-      if (event.oldVersion === 0) request.transaction?.abort();
-    };
-    request.onsuccess = () => {
-      const database = request.result;
-      if (!database.objectStoreNames.contains('projects')) { database.close(); resolve([]); return; }
-      const readRequest = database.transaction('projects', 'readonly').objectStore('projects').getAll();
-      readRequest.onsuccess = () => { database.close(); resolve(readRequest.result as EditorProject[]); };
-      readRequest.onerror = () => { database.close(); resolve([]); };
-    };
-    request.onerror = () => resolve([]);
-  });
-}
-
-/** Moves legacy browser projects to PostgreSQL once, preserving their media blobs. */
-async function migrateLegacyProjects(): Promise<void> {
-  if (!legacyMigration) {
-    legacyMigration = (async () => {
-      const projects = await readLegacyProjects();
-      for (const project of projects) {
-        const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}`);
-        if (response.status === 404) await saveProject(project);
-        else await readApiResult<StoredProject>(response);
-      }
-    })().catch((error) => {
-      legacyMigration = undefined;
-      throw error;
-    });
-  }
-  await legacyMigration;
 }
 
 /** Reads a typed result from the project API and surfaces its error description. */
@@ -64,7 +23,6 @@ async function readApiResult<T>(response: Response): Promise<T> {
 
 /** Loads a project and its binary media from the database-backed API. */
 export async function loadProject(id: string): Promise<EditorProject | undefined> {
-  await migrateLegacyProjects();
   const response = await fetch(`/api/projects/${encodeURIComponent(id)}`);
   if (response.status === 404) return undefined;
   const stored = await readApiResult<StoredProject>(response);
@@ -82,19 +40,20 @@ export async function loadProject(id: string): Promise<EditorProject | undefined
   return { ...project, assets } as EditorProject;
 }
 
-/** Uploads project media and saves the project JSON and media locations in PostgreSQL. */
-export async function saveProject(project: EditorProject): Promise<void> {
+/** Uploads changed media and saves the project JSON and locations in PostgreSQL. */
+async function saveProjectNow(project: EditorProject): Promise<void> {
   const mediaLocations: Record<string, string> = {};
-  await Promise.all(project.assets.filter((asset) => asset.blob).map(async (asset) => {
+  for (const asset of project.assets) {
+    if (!asset.blob) continue;
     const location = `/api/projects/${encodeURIComponent(project.id)}/media/${encodeURIComponent(asset.id)}`;
     const mediaKey = getMediaKey(project.id, asset.id);
     if (uploadedMedia.get(mediaKey) !== asset.blob) {
       const response = await fetch(location, { method: 'PUT', headers: { 'content-type': asset.mimeType || 'application/octet-stream' }, body: asset.blob });
       await readApiResult<{ assetId: string }>(response);
-      uploadedMedia.set(mediaKey, asset.blob as Blob);
+      uploadedMedia.set(mediaKey, asset.blob);
     }
     mediaLocations[asset.id] = location;
-  }));
+  }
   const { assets, ...projectData } = project;
   const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, {
     method: 'PUT',
@@ -104,9 +63,17 @@ export async function saveProject(project: EditorProject): Promise<void> {
   await readApiResult<{ id: string }>(response);
 }
 
-/** Returns the account's projects in recently edited order. */
+/** Serializes saves per project so rapid autosaves cannot overwrite newer edits. */
+export async function saveProject(project: EditorProject): Promise<void> {
+  const previousSave = projectSaveQueues.get(project.id) ?? Promise.resolve();
+  const currentSave = previousSave.catch(() => undefined).then(() => saveProjectNow(project));
+  projectSaveQueues.set(project.id, currentSave);
+  try { await currentSave; }
+  finally { if (projectSaveQueues.get(project.id) === currentSave) projectSaveQueues.delete(project.id); }
+}
+
+/** Returns saved projects in recently edited order. */
 export async function listProjects(): Promise<ProjectSummary[]> {
-  await migrateLegacyProjects();
   const response = await fetch('/api/projects');
   return readApiResult<ProjectSummary[]>(response);
 }
