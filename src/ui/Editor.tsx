@@ -15,7 +15,7 @@ const PROJECT_KEY = 'neupcut-current-project';
 const PIXELS_PER_SECOND = 12;
 const FRAME_RATE = 30;
 
-type DragState = { clipId: string; mode: 'move' | 'left' | 'right'; pointerX: number; start: number; duration: number; sourceStart: number; maxDuration: number; track: TrackKind };
+type DragState = { clipId: string; mode: 'move' | 'left' | 'right'; pointerX: number; pointerY: number; start: number; duration: number; sourceStart: number; maxDuration: number; track: TrackKind; trackIndex: number };
 type SelectionBox = { pointerId: number; startX: number; startY: number; currentX: number; currentY: number; left: number; top: number; width: number; height: number };
 type TimelineContextMenu = { x: number; y: number; clipId?: string; trackIndex?: number };
 type ProjectHistory = { projectId: string; past: EditorProject[]; present: EditorProject; future: EditorProject[]; pendingBefore: EditorProject | null; timer: number | null };
@@ -123,6 +123,7 @@ export default function Editor() {
   const effectCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const effectRendererRef = useRef<ReturnType<typeof createEffectRenderer> | undefined>(undefined);
   const dragRef = useRef<DragState | null>(null);
+  const [draggingClipId, setDraggingClipId] = useState<string | null>(null);
   const selectionRef = useRef<SelectionBox | null>(null);
   const urlsRef = useRef<Map<string, string>>(new Map());
   const timeRef = useRef(0);
@@ -1076,7 +1077,8 @@ export default function Editor() {
       setSelectedClipIds([clip.id]);
     }
     const asset = project.assets.find((item) => item.id === clip.assetId);
-    dragRef.current = { clipId: clip.id, mode, pointerX: event.clientX, start: clip.start, duration: clip.duration, sourceStart: clip.sourceStart, maxDuration: asset?.kind === 'image' ? Number.POSITIVE_INFINITY : asset?.duration ?? Number.POSITIVE_INFINITY, track: clip.track };
+    dragRef.current = { clipId: clip.id, mode, pointerX: event.clientX, pointerY: event.clientY, start: clip.start, duration: clip.duration, sourceStart: clip.sourceStart, maxDuration: asset?.kind === 'image' ? Number.POSITIVE_INFINITY : asset?.duration ?? Number.POSITIVE_INFINITY, track: clip.track, trackIndex: clipTrackIndex(clip) };
+    if (mode === 'move') setDraggingClipId(clip.id);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
@@ -1085,11 +1087,14 @@ export default function Editor() {
     const drag = dragRef.current;
     if (!drag) return;
     const delta = Math.round(((event.clientX - drag.pointerX) / (PIXELS_PER_SECOND * zoom)) * FRAME_RATE) / FRAME_RATE;
+    const lane = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('.track-lane');
+    const laneIndex = lane ? Array.from(document.querySelectorAll('.track-lane')).indexOf(lane) : -1;
+    const targetTrackIndex = drag.mode === 'move' && laneIndex >= 0 ? laneIndex : drag.trackIndex;
     setProject((current) => ({ ...current, clips: current.clips.map((clip) => {
       if (clip.id !== drag.clipId) return clip;
       if (drag.mode === 'move') {
         const requested = Math.max(0, Math.round((drag.start + delta) * FRAME_RATE) / FRAME_RATE);
-        return { ...clip, start: findOpenClipStart(current.clips, clipTrackIndex(clip), requested, clip.duration, clip.id) };
+        return { ...clip, trackIndex: targetTrackIndex, start: requested };
       }
       if (drag.mode === 'left') {
         const previousEnd = current.clips.filter((item) => item.id !== clip.id && clipTrackIndex(item) === clipTrackIndex(clip) && item.start + item.duration <= drag.start).reduce((end, item) => Math.max(end, item.start + item.duration), 0);
@@ -1101,8 +1106,17 @@ export default function Editor() {
     }) }));
   };
 
-  /** Completes a pointer driven clip move or trim operation. */
-  const endClipDrag = () => { dragRef.current = null; };
+  /** Resolves a clip's final free-drag preview to the nearest available position. */
+  const endClipDrag = () => {
+    const drag = dragRef.current;
+    if (drag?.mode === 'move') {
+      setProject((current) => ({ ...current, clips: current.clips.map((clip) => clip.id === drag.clipId
+        ? { ...clip, start: findOpenClipStart(current.clips, clipTrackIndex(clip), clip.start, clip.duration, clip.id) }
+        : clip) }));
+    }
+    dragRef.current = null;
+    setDraggingClipId(null);
+  };
 
   /** Opens export options before creating the downloadable render. */
   const exportVideo = useCallback(() => setShowExportSettings(true), []);
@@ -1343,7 +1357,7 @@ export default function Editor() {
               {trackRows.map((index) => <div key={index} className="track-lane" onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-neupcut-asset') || event.dataTransfer.types.includes('text/plain')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }} onDrop={(event) => dropAssetOnTimeline(event, index)} onPointerDown={(event) => { if (event.target === event.currentTarget) seekTo(Math.max(0, (event.clientX - event.currentTarget.getBoundingClientRect().left) / (PIXELS_PER_SECOND * zoom))); }}>
                 {project.clips.filter((clip) => clipTrackIndex(clip) === index).map((clip) => {
                   const asset = project.assets.find((item) => item.id === clip.assetId);
-                  return <button key={clip.id} data-clip-id={clip.id} className={`timeline-clip ${asset?.kind ?? 'video'} ${selectedClipIds.includes(clip.id) ? 'selected-clip' : ''} ${clip.assetId === hoveredMediaAssetId ? 'media-hover-highlight' : ''}`} style={{ left: `${clip.start * PIXELS_PER_SECOND * zoom}px`, width: `${Math.max(28, clip.duration * PIXELS_PER_SECOND * zoom)}px` }} onPointerDown={(event) => beginClipDrag(event, clip, 'move')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}>
+                  return <button key={clip.id} data-clip-id={clip.id} className={`timeline-clip ${asset?.kind ?? 'video'} ${selectedClipIds.includes(clip.id) ? 'selected-clip' : ''} ${clip.assetId === hoveredMediaAssetId ? 'media-hover-highlight' : ''} ${draggingClipId === clip.id ? 'is-dragging' : ''}`} style={{ left: `${clip.start * PIXELS_PER_SECOND * zoom}px`, width: `${Math.max(28, clip.duration * PIXELS_PER_SECOND * zoom)}px` }} onPointerDown={(event) => beginClipDrag(event, clip, 'move')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}>
                     <span className="trim-handle left" title="Trim start" onPointerDown={(event) => beginClipDrag(event, clip, 'left')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} />
                     <strong>{clip.track === 'audio' && <Music2 size={11} />} {clip.name}</strong><small>{formatTime(clip.duration)}</small>
                     <span className="trim-handle right" title="Trim end" onPointerDown={(event) => beginClipDrag(event, clip, 'right')} onPointerMove={(event) => { if (!(event.pointerType === 'touch' && pinchRef.current)) updateClipDrag(event); }} onPointerUp={endClipDrag} />

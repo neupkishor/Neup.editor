@@ -124,6 +124,7 @@ button { color: inherit; }
 .timeline-clip.violet { background: #382d4b; border-color: #54416d; color: #d4b9fc; }.timeline-clip.blue { background: #27394c; border-color: #38536d; color: #a6c9ef; }.timeline-clip.green { background: #233c34; border-color: #315648; color: #9ed9bb; }
 .timeline-clip strong { position: relative; z-index: 1; font-size: 8px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .timeline-clip.selected-clip { outline: 1px solid #c39af7; outline-offset: 1px; }
+.timeline-clip.is-dragging { z-index: 6; cursor: grabbing; opacity: .9; filter: brightness(1.18); box-shadow: 0 5px 14px #0008, 0 0 0 1px #d9c1ff99; }
 .clip-filmstrip { position: absolute; inset: 3px; display: flex; gap: 3px; opacity: .22; overflow: hidden; }.clip-filmstrip span { min-width: 29px; border: 1px solid currentColor; border-radius: 2px; background: linear-gradient(135deg,transparent 45%,currentColor 46%,transparent 49%); }
 .audio-clip { top: 5px; height: 36px; }.waveform { position: absolute; inset: 0; display: flex; align-items: center; white-space: nowrap; overflow: hidden; font-size: 16px; letter-spacing: 1px; opacity: .25; }
 .audio-clip strong { display: flex; align-items: center; gap: 5px; }

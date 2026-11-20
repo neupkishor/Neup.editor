@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "node scripts/dev.mjs",
+    "start": "node scripts/dev.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "mcp": "node bridge/mcp.v1/server.mjs"

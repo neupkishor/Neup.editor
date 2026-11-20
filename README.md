@@ -9,11 +9,11 @@ npm install
 npm run dev
 ```
 
-Projects and imported media are saved locally in IndexedDB in the current browser. Export records the rendered canvas to WebM in real time, so export takes approximately as long as the video. Use a current Chromium based browser for the broadest MediaRecorder support.
+This starts the editor and its Streamable HTTP MCP endpoint in one Node process and on one port. `npm start` does the same. Open the editor URL printed in the terminal; MCP clients can connect to the same origin at `/bridge/mcp.v1`. Set `HOST` and `PORT` (or `NEUPCUT_HTTP_HOST` and `NEUPCUT_HTTP_PORT`) to change the listener address and port, or `NEUPCUT_HTTP_PATH` to change the MCP path. Projects and imported media are saved locally in IndexedDB in the current browser. Export records the rendered canvas to WebM in real time, so export takes approximately as long as the video. Use a current Chromium based browser for the broadest MediaRecorder support.
 
 ## MCP server
 
-The stdio MCP server lives in `bridge/mcp.v1/`. It edits portable `.neupcut.json` project files and can also run FFmpeg operations on local video files. Install FFmpeg and FFprobe and make both commands available on `PATH`. Set `NEUPCUT_MEDIA_DIR` to the folder containing source videos; outputs are written there as new files. Set `NEUPCUT_PROJECTS_DIR` to choose where project files are stored. Start the server with `npm run mcp` and add it to an MCP client:
+The MCP server lives in `bridge/mcp.v1/`. It supports stdio and Streamable HTTP. It edits portable `.neupcut.json` project files and can also run FFmpeg operations on local video files. Install FFmpeg and FFprobe and make both commands available on `PATH`. Set `NEUPCUT_MEDIA_DIR` to the folder containing source videos; outputs are written there as new files. Set `NEUPCUT_PROJECTS_DIR` to choose where project files are stored. For stdio MCP clients, run `npm run mcp` and add it to an MCP client:
 
 ```json
 {
