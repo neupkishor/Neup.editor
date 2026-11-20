@@ -6,14 +6,19 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "start": "node scripts/dev.mjs",
-    "build": "tsc -b && vite build",
+    "build": "prisma generate && tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "mcp": "node bridge/mcp.v1/server.mjs"
+    "mcp": "node bridge/mcp.v1/server.mjs",
+    "postinstall": "prisma generate",
+    "db:migrate": "prisma migrate dev"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.10.1",
+    "dotenv": "^18.0.10",
     "lucide-react": "^0.468.0",
+    "pg": "^8.23.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zod": "^4.6.7"

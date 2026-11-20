@@ -1,0 +1,18 @@
+Table: accounts, Model: Account
+Fields:
+> id: uuid, default: gen_random_uuid();
+> displayName: text, nullable;
+> displayImage: text, nullable;
+> neupid: text, unique, nullable;
+> type: enum(individual, brand, dependent), default: individual;
+> details: jsonb, nullable;
+
+Table: projects, Model: Project
+Fields:
+> id: uuid, default: gen_random_uuid();
+> accountId: uuid, nullable, references accounts.id;
+> name: text;
+> data: jsonb, project JSON;
+> mediaLocations: jsonb, default: {};
+> createdAt: timestamp with time zone, default: now();
+> updatedAt: timestamp with time zone, auto-updated;

@@ -3,11 +3,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 import { createMcpHttpHandler } from '../bridge/mcp.v1/server.mjs';
+import { closeProjectApi, handleProjectApi } from '../server/projects.mjs';
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const host = process.env.HOST || process.env.NEUPCUT_HTTP_HOST || '0.0.0.0';
 const port = Number(process.env.PORT || process.env.NEUPCUT_HTTP_PORT || 5173);
 const endpoint = process.env.NEUPCUT_HTTP_PATH || '/bridge/mcp.v1';
+let isShuttingDown = false;
 
 /** Starts Vite and Streamable HTTP MCP behind one Node HTTP listener. */
 async function startApplication() {
@@ -24,6 +26,7 @@ async function startApplication() {
 
   httpServer.on('request', async (request, response) => {
     const requestUrl = new URL(request.url || '/', `http://${request.headers.host || `${host}:${port}`}`);
+    if (await handleProjectApi(request, response, requestUrl)) return;
     if (requestUrl.pathname === endpoint) {
       await handleMcpRequest(request, response);
       return;
@@ -46,8 +49,13 @@ async function startApplication() {
 
   /** Closes the HTTP listener and Vite cleanly on process shutdown. */
   async function shutdown() {
-    httpServer.close();
-    await vite.close();
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    await Promise.all([
+      new Promise((resolve) => httpServer.close(resolve)),
+      vite.close(),
+      closeProjectApi(),
+    ]);
   }
   process.once('SIGINT', () => { void shutdown(); });
   process.once('SIGTERM', () => { void shutdown(); });

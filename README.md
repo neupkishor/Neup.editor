@@ -9,7 +9,9 @@ npm install
 npm run dev
 ```
 
-This starts the editor and its Streamable HTTP MCP endpoint in one Node process and on one port. `npm start` does the same. Open the editor URL printed in the terminal; MCP clients can connect to the same origin at `/bridge/mcp.v1`. Set `HOST` and `PORT` (or `NEUPCUT_HTTP_HOST` and `NEUPCUT_HTTP_PORT`) to change the listener address and port, or `NEUPCUT_HTTP_PATH` to change the MCP path. Projects and imported media are saved locally in IndexedDB in the current browser. Export records the rendered canvas to WebM in real time, so export takes approximately as long as the video. Use a current Chromium based browser for the broadest MediaRecorder support.
+This starts the editor and its Streamable HTTP MCP endpoint in one Node process and on one port. `npm start` does the same. Open the editor URL printed in the terminal; MCP clients can connect to the same origin at `/bridge/mcp.v1`. Set `HOST` and `PORT` (or `NEUPCUT_HTTP_HOST` and `NEUPCUT_HTTP_PORT`) to change the listener address and port, or `NEUPCUT_HTTP_PATH` to change the MCP path. Projects and their timeline data are saved in PostgreSQL; uploaded media is saved on the server and its locations are recorded in each project. Projects previously saved in this browser's IndexedDB are copied to PostgreSQL the first time the editor opens. Export records the rendered canvas to WebM in real time, so export takes approximately as long as the video. Use a current Chromium based browser for the broadest MediaRecorder support.
+
+Set `DATABASE_URL` to a PostgreSQL connection string before starting the app. The Prisma schema is in `prisma/schema.prisma`; `database.live` is its readable schema snapshot. Project media is stored under `media/projects` by default; set `NEUPCUT_PROJECT_MEDIA_DIR` to change that directory.
 
 ## MCP server
 

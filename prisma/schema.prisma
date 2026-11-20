@@ -1,0 +1,40 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AccountType {
+  individual
+  brand
+  dependent
+}
+
+model Account {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  displayName   String?
+  displayImage  String?
+  neupid        String?       @unique
+  type          AccountType   @default(individual)
+  details       Json?         @db.JsonB
+  projects      Project[]
+
+  @@map("accounts")
+}
+
+model Project {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId      String?  @db.Uuid
+  account        Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  name           String
+  data           Json     @db.JsonB
+  mediaLocations Json     @default("{}") @db.JsonB
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([accountId])
+  @@index([updatedAt])
+  @@map("projects")
+}

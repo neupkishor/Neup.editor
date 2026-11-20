@@ -1,4 +1,5 @@
 node_modules/
 dist/
+media/projects/
 .DS_Store
 *.log
