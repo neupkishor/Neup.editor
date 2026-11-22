@@ -3,3 +3,4 @@ dist/
 media/projects/
 .DS_Store
 *.log
+.env
